@@ -1,0 +1,38 @@
+# build artifacts
+*.o
+*.a
+*.so
+*.dep
+*.debug
+smolvfs
+test_cas
+test_vfs
+test_cas_tree
+test_vfs_snap
+castool
+
+# editor swap/backup files
+*~
+*.swp
+.*.swp
+*.swo
+.*.swo
+\#*\#
+.#*
+
+# macOS
+.DS_Store
+
+# clangd / LSP
+.cache/
+compile_commands.json
+
+# ccls
+.ccls-cache/
+
+# vim session
+Session.vim
+
+# core dumps
+core
+core.*
