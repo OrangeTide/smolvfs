@@ -18,6 +18,8 @@
 #define CAS_TREE_S_IFDIR  0040000
 #define CAS_TREE_S_IFREG  0100000
 
+#define CAS_TREE_USE_HTREE 0x1
+
 /****************************************************************
  * Data structures
  ****************************************************************/
@@ -52,6 +54,12 @@ struct cas *
 cas_tree_cas(struct cas_tree *ct);
 
 void
+cas_tree_set_flags(struct cas_tree *ct, unsigned flags);
+
+unsigned
+cas_tree_get_flags(struct cas_tree *ct);
+
+void
 cas_tree_free(struct cas_tree *ct);
 
 /****************************************************************
@@ -77,10 +85,17 @@ int
 cas_tree_store(struct cas_tree *ct, struct cas_tree_dir *dir,
                char *hash_out);
 
-/** Load a "tree" object from CAS into a directory listing. */
+/** Load a "tree" or "htree" object from CAS into a directory listing. */
 int
 cas_tree_load(struct cas_tree *ct, const char *hash,
               struct cas_tree_dir *dir);
+
+/** Look up a single entry by name within a tree/htree object.
+ *  O(1) for htree, O(n) for text tree.
+ */
+int
+cas_tree_lookup(struct cas_tree *ct, const char *tree_hash,
+                const char *name, struct cas_tree_entry *e_out);
 
 /****************************************************************
  * Refs and log

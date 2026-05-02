@@ -652,6 +652,81 @@ cas_put_object(struct cas *store, const char *type,
 }
 
 int
+cas_put_object_at(struct cas *store, const char *type,
+                  const void *data, size_t len,
+                  const char *hash)
+{
+    if (!valid_hash(hash))
+        return CAS_ERR;
+
+    char hdr[CAS_HEADER_MAX];
+    int hdrlen = format_header(hdr, sizeof(hdr), type, len);
+
+    if (hdrlen < 0 || (size_t)hdrlen > CAS_PACK_HEADER_LEN)
+        return CAS_ERR;
+
+    char path[CAS_PATH_MAX];
+    char dir[CAS_PATH_MAX];
+    char tmp[CAS_PATH_MAX];
+
+    if (build_path(store, hash, path, sizeof(path)) != CAS_OK)
+        return CAS_ERR;
+    if (build_dir(store, hash, dir, sizeof(dir)) != CAS_OK)
+        return CAS_ERR;
+
+    if (access(path, F_OK) == 0 ||
+        (store->pack && cas_pack_exists(store->pack, hash)))
+        return CAS_OK;
+
+    mkdir(store->basedir, 0755);
+    mkdir(dir, 0755);
+
+    if (snprintf(tmp, sizeof(tmp), "%s/.cas.XXXXXX", dir) >=
+        (int)sizeof(tmp))
+        return CAS_ERR;
+
+    int fd = mkstemp(tmp);
+
+    if (fd < 0)
+        return CAS_EIO;
+
+    int rc;
+
+    if (len > 0) {
+        rc = write_full(fd, data, len);
+        if (rc != CAS_OK) {
+            close(fd);
+            unlink(tmp);
+            return rc;
+        }
+    }
+
+    struct cas_pack_trailer tr;
+    static const unsigned char magic[] = CAS_PACK_TRAILER_MAGIC;
+
+    memcpy(tr.magic, magic, CAS_PACK_MAGIC_LEN);
+    memset(tr.header, 0, CAS_PACK_HEADER_LEN);
+    memcpy(tr.header, hdr, (size_t)hdrlen);
+
+    rc = write_full(fd, &tr, sizeof(tr));
+    if (rc != CAS_OK) {
+        close(fd);
+        unlink(tmp);
+        return rc;
+    }
+
+    close(fd);
+
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        if (access(path, F_OK) != 0)
+            return CAS_EIO;
+    }
+
+    return CAS_OK;
+}
+
+int
 cas_put(struct cas *store, const void *data, size_t len,
         char *hash_out)
 {

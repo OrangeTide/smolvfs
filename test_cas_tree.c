@@ -919,6 +919,381 @@ test_log_truncated(void)
 }
 
 /****************************************************************
+ * Htree: round trip
+ ****************************************************************/
+
+static void
+test_htree_round_trip(void)
+{
+    struct cas *store = make_store("htree_rt");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "hello", 5, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e1 = {
+        .mode = 0100644,
+        .uid = 1000,
+        .gid = 1000,
+        .mtime_s = 1700000000LL,
+        .mtime_ns = 123456789,
+    };
+
+    memcpy(e1.hash, blob_hash, CAS_HASH_HEX + 1);
+    strcpy(e1.name, "file.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e1), CAS_OK);
+
+    struct cas_tree_entry e2 = {
+        .mode = 0040755,
+        .uid = 0,
+        .gid = 0,
+        .mtime_s = 1700000001LL,
+        .mtime_ns = 0,
+    };
+
+    memset(e2.hash, 'a', CAS_HASH_HEX);
+    e2.hash[CAS_HASH_HEX] = '\0';
+    strcpy(e2.name, "subdir");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e2), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+
+    struct cas_tree_dir loaded;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &loaded), CAS_OK);
+    ASSERT_INT_EQ(loaded.count, 2);
+
+    ASSERT_STR_EQ(loaded.entries[0].name, "file.txt");
+    ASSERT_INT_EQ(loaded.entries[0].mode, 0100644);
+    ASSERT_INT_EQ(loaded.entries[0].uid, 1000);
+    ASSERT_INT_EQ(loaded.entries[0].gid, 1000);
+    ASSERT_INT_EQ((int)(loaded.entries[0].mtime_s >> 32), 0);
+    ASSERT_INT_EQ((int)loaded.entries[0].mtime_s, 1700000000);
+    ASSERT_INT_EQ(loaded.entries[0].mtime_ns, 123456789);
+    ASSERT_STR_EQ(loaded.entries[0].hash, blob_hash);
+
+    ASSERT_STR_EQ(loaded.entries[1].name, "subdir");
+    ASSERT_INT_EQ(loaded.entries[1].mode, 0040755);
+
+    cas_tree_dir_free(&loaded);
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * Htree: same hash as text tree
+ ****************************************************************/
+
+static void
+test_htree_same_hash(void)
+{
+    struct cas *store_text = make_store("htree_hash_txt");
+    struct cas *store_htree = make_store("htree_hash_ht");
+    struct cas_tree *ct_text = cas_tree_new(store_text);
+    struct cas_tree *ct_htree = cas_tree_new(store_htree);
+
+    cas_tree_set_flags(ct_htree, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store_text, "data", 4, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = {
+        .mode = 0100644,
+        .uid = 500,
+        .gid = 500,
+        .mtime_s = 1700000000LL,
+        .mtime_ns = 0,
+    };
+
+    memcpy(e.hash, blob_hash, CAS_HASH_HEX + 1);
+    strcpy(e.name, "test.dat");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char hash_text[CAS_HASH_HEX + 1];
+    char hash_htree[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct_text, &dir, hash_text), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_store(ct_htree, &dir, hash_htree), CAS_OK);
+    ASSERT_STR_EQ(hash_text, hash_htree);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct_htree);
+    cas_tree_free(ct_text);
+    cas_free(store_htree);
+    cas_free(store_text);
+}
+
+/****************************************************************
+ * Htree: O(1) lookup
+ ****************************************************************/
+
+static void
+test_htree_lookup(void)
+{
+    struct cas *store = make_store("htree_lookup");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char h1[CAS_HASH_HEX + 1], h2[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "aaa", 3, h1), CAS_OK);
+    ASSERT_INT_EQ(cas_put(store, "bbb", 3, h2), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e1 = {
+        .mode = 0100644, .uid = 1, .gid = 2,
+        .mtime_s = 100, .mtime_ns = 50,
+    };
+
+    memcpy(e1.hash, h1, CAS_HASH_HEX + 1);
+    strcpy(e1.name, "alpha.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e1), CAS_OK);
+
+    struct cas_tree_entry e2 = {
+        .mode = 0100755, .uid = 3, .gid = 4,
+        .mtime_s = 200, .mtime_ns = 99,
+    };
+
+    memcpy(e2.hash, h2, CAS_HASH_HEX + 1);
+    strcpy(e2.name, "beta.bin");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e2), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+
+    struct cas_tree_entry found;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "beta.bin", &found),
+                  CAS_OK);
+    ASSERT_STR_EQ(found.name, "beta.bin");
+    ASSERT_INT_EQ(found.mode, 0100755);
+    ASSERT_INT_EQ(found.uid, 3);
+    ASSERT_INT_EQ(found.gid, 4);
+    ASSERT_INT_EQ((int)found.mtime_s, 200);
+    ASSERT_INT_EQ(found.mtime_ns, 99);
+    ASSERT_STR_EQ(found.hash, h2);
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "alpha.txt", &found),
+                  CAS_OK);
+    ASSERT_STR_EQ(found.name, "alpha.txt");
+    ASSERT_STR_EQ(found.hash, h1);
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "missing", &found),
+                  CAS_ENOTFOUND);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * Htree: empty tree
+ ****************************************************************/
+
+static void
+test_htree_empty(void)
+{
+    struct cas *store = make_store("htree_empty");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+
+    struct cas_tree_dir loaded;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &loaded), CAS_OK);
+    ASSERT_INT_EQ(loaded.count, 0);
+
+    struct cas_tree_entry found;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "anything", &found),
+                  CAS_ENOTFOUND);
+
+    cas_tree_dir_free(&loaded);
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * Htree: fsck validates htree objects
+ ****************************************************************/
+
+static void
+test_htree_fsck(void)
+{
+    struct cas *store = make_store("htree_fsck");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "data", 4, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = {
+        .mode = 0100644, .uid = 0, .gid = 0,
+        .mtime_s = 1700000000LL, .mtime_ns = 0,
+    };
+
+    memcpy(e.hash, blob_hash, CAS_HASH_HEX + 1);
+    strcpy(e.name, "file.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_ref_commit(ct, "htfsck", hash, "test"),
+                  CAS_OK);
+    ASSERT_INT_EQ(cas_tree_fsck(ct, NULL, NULL), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_fsck_root(ct, hash, NULL, NULL), CAS_OK);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * Htree: text tree lookup works too
+ ****************************************************************/
+
+static void
+test_text_tree_lookup(void)
+{
+    struct cas *store = make_store("text_lookup");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    char h1[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h1), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = {
+        .mode = 0100644, .uid = 0, .gid = 0,
+        .mtime_s = 100, .mtime_ns = 0,
+    };
+
+    memcpy(e.hash, h1, CAS_HASH_HEX + 1);
+    strcpy(e.name, "only.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+
+    struct cas_tree_entry found;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "only.txt", &found),
+                  CAS_OK);
+    ASSERT_STR_EQ(found.hash, h1);
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "nope", &found),
+                  CAS_ENOTFOUND);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * Htree: many entries (hash collision coverage)
+ ****************************************************************/
+
+static void
+test_htree_many_entries(void)
+{
+    struct cas *store = make_store("htree_many");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    for (int i = 0; i < 512; i++) {
+        struct cas_tree_entry e = {
+            .mode = 0100644, .uid = i, .gid = 0,
+            .mtime_s = (int64_t)i, .mtime_ns = 0,
+        };
+
+        memcpy(e.hash, blob_hash, CAS_HASH_HEX + 1);
+        snprintf(e.name, sizeof(e.name), "file_%04d.txt", i);
+        ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    }
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+
+    struct cas_tree_dir loaded;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &loaded), CAS_OK);
+    ASSERT_INT_EQ(loaded.count, 512);
+
+    struct cas_tree_entry found;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "file_0000.txt", &found),
+                  CAS_OK);
+    ASSERT_INT_EQ(found.uid, 0);
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "file_0255.txt", &found),
+                  CAS_OK);
+    ASSERT_INT_EQ(found.uid, 255);
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "file_0511.txt", &found),
+                  CAS_OK);
+    ASSERT_INT_EQ(found.uid, 511);
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "file_0512.txt", &found),
+                  CAS_ENOTFOUND);
+
+    ASSERT_INT_EQ(cas_tree_fsck_root(ct, hash, NULL, NULL), CAS_OK);
+
+    cas_tree_dir_free(&loaded);
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -951,6 +1326,13 @@ main(void)
     RUN(test_ref_invalid_name);
     RUN(test_ref_invalid_hash);
     RUN(test_log_truncated);
+    RUN(test_htree_round_trip);
+    RUN(test_htree_same_hash);
+    RUN(test_htree_lookup);
+    RUN(test_htree_empty);
+    RUN(test_htree_fsck);
+    RUN(test_text_tree_lookup);
+    RUN(test_htree_many_entries);
 
     TEST_REPORT();
 }

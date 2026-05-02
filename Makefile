@@ -68,5 +68,14 @@ smoke: $(TEST_BINS)
 	./test.sh
 run: smolvfs
 	./smolvfs
-.PHONY: all clean clean-all test smoke run
+coverage: clean-all coverage-clean
+	$(MAKE) CFLAGS="$(CFLAGS) --coverage" test
+	lcov --capture --directory . --output-file coverage.info
+	lcov --remove coverage.info '/usr/*' --output-file coverage.info
+	genhtml coverage.info --output-directory coverage-html
+
+coverage-clean:
+	$(RM) -r coverage-html coverage.info *.gcda *.gcno
+
+.PHONY: all clean clean-all test smoke run coverage coverage-clean
 -include $(DEPS)

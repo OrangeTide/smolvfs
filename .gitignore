@@ -6,6 +6,7 @@
 *.debug
 smolvfs
 test_cas
+test_cas_pack
 test_vfs
 test_cas_tree
 test_vfs_snap
@@ -32,6 +33,12 @@ compile_commands.json
 
 # vim session
 Session.vim
+
+# coverage
+*.gcda
+*.gcno
+coverage.info
+coverage-html/
 
 # core dumps
 core

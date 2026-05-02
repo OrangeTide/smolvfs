@@ -98,6 +98,15 @@ int
 cas_put_object(struct cas *store, const char *type,
                const void *data, size_t len, char *hash_out);
 
+/** Store a typed object at a caller-supplied hash address.
+ *  The hash is NOT recomputed — the caller is responsible for
+ *  providing the correct canonical hash.
+ */
+int
+cas_put_object_at(struct cas *store, const char *type,
+                  const void *data, size_t len,
+                  const char *hash);
+
 /** Check whether an object with the given hex hash exists.
  *  Returns nonzero if present, 0 if not.
  */
