@@ -8,10 +8,10 @@ SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(SRCS:.c=.d)
 LIB := libvfs.a
-LIBSRCS := vfs.c cas.c cas-tree.c cas-pack.c vfs-snap.c
+LIBSRCS := vfs.c cas.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 DEPS += $(LIBSRCS:.c=.d)
-TEST_SRCS = test_cas.c test_vfs.c test_cas_tree.c test_cas_pack.c test_vfs_snap.c
+TEST_SRCS = test_cas.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c
 TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 compile.c = $(CC) -c -o $@ -MMD -MF $(@:.o=.dep) $(CFLAGS) $(CPPFLAGS) $<
@@ -55,6 +55,12 @@ cas-pack.o : cas-pack.c
 test_cas_pack: test_cas_pack.o cas-pack.o cas.o
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_cas_pack.o : test_cas_pack.c
+	$(compile.c)
+test_cas_omap: test_cas_omap.o cas-omap.o cas-pack.o cas.o
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
+test_cas_omap.o : test_cas_omap.c
+	$(compile.c)
+cas-omap.o : cas-omap.c
 	$(compile.c)
 castool.o : castool.c
 	$(compile.c)
