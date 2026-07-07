@@ -56,6 +56,48 @@ codec_find(int tag)
 }
 
 /****************************************************************
+ * Compression policy
+ ****************************************************************/
+
+/* Does the prefix look like text?  Binary is flagged by too many
+ * C0 control bytes other than the usual whitespace; high-bit bytes
+ * are allowed so UTF-8 counts as text. */
+static int
+looks_text(const void *data, size_t len)
+{
+    const unsigned char *p = data;
+
+    if (len == 0)
+        return 0;
+
+    size_t n = len < CAS_TEXT_SNIFF ? len : CAS_TEXT_SNIFF;
+    size_t nontext = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = p[i];
+
+        if (c <= 0x08 || (c >= 0x0e && c <= 0x1f) || c == 0x7f)
+            nontext++;
+    }
+
+    return nontext * 100 <= n * CAS_TEXT_MAX_NONTEXT_PCT;
+}
+
+int
+cas_codec_policy(int policy, int codec, const void *data, size_t len)
+{
+    switch (policy) {
+    case CAS_COMPRESS_ALWAYS:
+        return codec;
+    case CAS_COMPRESS_GUESS:
+        return looks_text(data, len) ? codec : CAS_CODEC_NONE;
+    case CAS_COMPRESS_NEVER:
+    default:
+        return CAS_CODEC_NONE;
+    }
+}
+
+/****************************************************************
  * Lookup wrappers
  ****************************************************************/
 
