@@ -908,6 +908,82 @@ cmd_pack(struct cas_tree *ct, int argc, char **argv)
 }
 
 /****************************************************************
+ * import-pack: merge a downloaded bundle into this depot
+ ****************************************************************/
+
+static int
+cmd_import_pack(struct cas_tree *ct, int argc, char **argv)
+{
+	int policy = CAS_COMPRESS_NEVER;
+	int i = 0;
+
+	if (i < argc && strcmp(argv[i], "-z") == 0) {
+		policy = CAS_COMPRESS_GUESS;
+		i++;
+	}
+
+	const char *packfile = (i < argc) ? argv[i++] : NULL;
+	const char *ref = NULL;
+	const char *roothash = NULL;
+
+	if (packfile && i + 2 == argc) {
+		ref = argv[i++];
+		roothash = argv[i++];
+	}
+
+	if (!packfile || i != argc) {
+		fprintf(stderr,
+		        "usage: %s import-pack [-z] <pack-file> "
+		        "[<ref> <root-hash>]\n", progname);
+		return 1;
+	}
+
+	struct cas *store = cas_tree_cas(ct);
+	struct cas_pack *pack = cas_pack_open(packfile);
+
+	if (!pack) {
+		fprintf(stderr, "%s: cannot open bundle '%s'\n",
+		        progname, packfile);
+		return 1;
+	}
+
+	uint64_t total = 0, stored = 0;
+	int rc = cas_pack_import(pack, store, policy, CAS_CODEC_DEFLATE,
+	                         &total, &stored);
+
+	cas_pack_close(pack);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: import failed: %s\n",
+		        progname, cas_strerror(rc));
+		return 1;
+	}
+
+	fprintf(stderr, "import-pack: %" PRIu64 " objects, %" PRIu64
+	        " new\n", total, stored);
+
+	if (ref) {
+		if (!cas_exists(store, roothash)) {
+			fprintf(stderr,
+			        "%s: root hash '%s' not present in bundle\n",
+			        progname, roothash);
+			return 1;
+		}
+		rc = cas_tree_ref_commit(ct, ref, roothash,
+		                         "imported bundle");
+		if (rc != CAS_OK) {
+			fprintf(stderr, "%s: ref commit failed: %s\n",
+			        progname, cas_strerror(rc));
+			return 1;
+		}
+		fprintf(stderr, "import-pack: ref '%s' -> %s\n",
+		        ref, roothash);
+	}
+
+	return 0;
+}
+
+/****************************************************************
  * Command dispatch
  ****************************************************************/
 
@@ -930,6 +1006,8 @@ static const struct command commands[] = {
 	{ "fsck",   cmd_fsck,   "fsck" },
 	{ "gc",     cmd_gc,     "gc" },
 	{ "pack",   cmd_pack,   "pack [-z] loose objects (-z compresses)" },
+	{ "import-pack", cmd_import_pack,
+	  "import-pack [-z] <pack-file> [<ref> <root-hash>]" },
 };
 
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
