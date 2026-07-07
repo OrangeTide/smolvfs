@@ -4,7 +4,7 @@ set -e
 
 fail=0
 
-for t in test_cas test_vfs test_cas_tree test_cas_pack test_cas_omap test_vfs_snap; do
+for t in test_cas test_cas_codec test_vfs test_cas_tree test_cas_pack test_cas_omap test_vfs_snap; do
     if ./"$t"; then
         :
     else
