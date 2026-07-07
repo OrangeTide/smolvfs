@@ -487,13 +487,13 @@ hash_cmp(const void *a, const void *b)
 	return memcmp(a, b, CAS_HASH_LEN);
 }
 
-/* Build a packfile from all loose objects.  When codec is not
- * CAS_CODEC_NONE and an encoder for it is available, each raw (v1)
- * object is compressed into the packfile if that saves space;
- * already-compressed objects are copied verbatim.  The address of
- * every object is unchanged. */
+/* Build a packfile from all loose objects.  policy/codec decide per
+ * object whether to compress a raw (v1) object into the packfile;
+ * compression is kept only if it saves space, and already-compressed
+ * objects are copied verbatim.  The address of every object is
+ * unchanged. */
 static int
-pack_create(struct cas *store, const char *path, int codec)
+pack_create(struct cas *store, const char *path, int policy, int codec)
 {
 	struct hash_list hl = {0};
 
@@ -590,19 +590,23 @@ pack_create(struct cas *store, const char *path, int codec)
 		uint64_t emit_size = cf.len;
 		unsigned char *scratch = NULL;
 
-		/* compress a raw object if a codec is requested and helps */
-		if (codec != CAS_CODEC_NONE && !framed_in && cf.len > 0 &&
-		    cas_codec_can_encode(codec)) {
+		/* a raw object is the plaintext, so the policy can judge
+		 * it; already-compressed (framed) objects are left alone */
+		int use = (!framed_in && cf.len > 0)
+		          ? cas_codec_policy(policy, codec, cf.data, cf.len)
+		          : CAS_CODEC_NONE;
+
+		if (use != CAS_CODEC_NONE && cas_codec_can_encode(use)) {
 			scratch = malloc(cf.len + 1);
 			if (scratch) {
 				size_t plen = cf.len;
-				int erc = cas_codec_encode(codec, cf.data,
+				int erc = cas_codec_encode(use, cf.data,
 				                           cf.len, scratch + 1,
 				                           &plen);
 
 				if (erc == CAS_OK &&
 				    plen + 1 < cf.len - cf.len / 8) {
-					scratch[0] = (unsigned char)codec;
+					scratch[0] = (unsigned char)use;
 					emit = scratch;
 					emit_size = plen + 1;
 					/* header stays "type plaintext_len\0";
@@ -713,11 +717,12 @@ pack_create(struct cas *store, const char *path, int codec)
 int
 cas_pack_create(struct cas *store, const char *path)
 {
-	return pack_create(store, path, CAS_CODEC_NONE);
+	return pack_create(store, path, CAS_COMPRESS_NEVER, CAS_CODEC_NONE);
 }
 
 int
-cas_pack_create_z(struct cas *store, const char *path, int codec)
+cas_pack_create_z(struct cas *store, const char *path, int policy,
+                  int codec)
 {
-	return pack_create(store, path, codec);
+	return pack_create(store, path, policy, codec);
 }
