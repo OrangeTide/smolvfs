@@ -70,6 +70,14 @@ smolvfs client.  [DOWNLOAD.md](DOWNLOAD.md) describes an incremental
 CAS-over-HTTP protocol for fetching a snapshot from static hosting while
 downloading only the objects a client lacks.
 
+[SHOAL.md](SHOAL.md) is a proposed design (not implemented) for a
+content-addressed replication network layered on this storage core: a
+confederation of trusted nodes sharing immutable objects and signed,
+versioned named topics, with K-closest content placement, chunked large
+files, and partial-state garbage collection.  It records the decisions
+from that design discussion and the changes smolvfs would need to
+support it.
+
 ## Usage
 
 ### Adding to your project
