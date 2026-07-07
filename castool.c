@@ -428,9 +428,23 @@ cmd_tree(struct cas_tree *ct, int argc, char **argv)
 static int
 cmd_import(struct cas_tree *ct, int argc, char **argv)
 {
+	int policy = CAS_COMPRESS_NEVER;
+
+	/* optional leading -z: compress text-like files */
+	if (argc >= 1 && strcmp(argv[0], "-z") == 0) {
+		policy = CAS_COMPRESS_GUESS;
+		if (!cas_codec_can_encode(CAS_CODEC_DEFLATE))
+			fprintf(stderr,
+			        "%s: warning: no compression codec compiled "
+			        "in (build with MINIZ=1); importing "
+			        "uncompressed\n", progname);
+		argc--;
+		argv++;
+	}
+
 	if (argc < 2) {
 		fprintf(stderr,
-		        "usage: %s import <ref> <file>...\n", progname);
+		        "usage: %s import [-z] <ref> <file>...\n", progname);
 		return 1;
 	}
 
@@ -479,7 +493,10 @@ cmd_import(struct cas_tree *ct, int argc, char **argv)
 		}
 
 		char bhash[CAS_HASH_HEX + 1];
-		int rc = cas_put(store, data, flen, bhash);
+		int use = cas_codec_policy(policy, CAS_CODEC_DEFLATE,
+		                           data, flen);
+		int rc = cas_put_object_z(store, "blob", use, data, flen,
+		                          bhash);
 
 		free(data);
 		if (rc != CAS_OK) {
@@ -905,7 +922,7 @@ static const struct command commands[] = {
 	{ "cat",    cmd_cat,    "cat <hash>" },
 	{ "ls",     cmd_ls,     "ls <ref-or-hash>" },
 	{ "tree",   cmd_tree,   "tree <ref-or-hash>" },
-	{ "import", cmd_import, "import <ref> <file>..." },
+	{ "import", cmd_import, "import [-z] <ref> <file>..." },
 	{ "export", cmd_export, "export <ref-or-hash> <destdir>" },
 	{ "rm",     cmd_rm,     "rm <ref> <name>..." },
 	{ "hash",   cmd_hash,   "hash [file]" },
