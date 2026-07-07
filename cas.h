@@ -36,12 +36,21 @@ cas_strerror(int err);
 /** Opaque store handle. */
 struct cas;
 
-/** Handle to an open object (mmap'd for reading). */
+/** Handle to an open object.
+ *
+ *  data/len are the object's plaintext.  The remaining fields are
+ *  private teardown state: cas_close() invokes _release (if set)
+ *  to unmap or free whatever backs the data, so callers never
+ *  handle the storage kind themselves.  An uncompressed object
+ *  points data straight into an mmap; a compressed object is
+ *  decoded into a heap buffer.
+ */
 struct cas_file {
     const unsigned char *data;
     size_t len;
-    void *_map;
-    size_t _maplen;
+    void *_priv;
+    size_t _privlen;
+    void (*_release)(struct cas_file *cf);
 };
 
 /****************************************************************
@@ -107,11 +116,65 @@ cas_put_object_at(struct cas *store, const char *type,
                   const void *data, size_t len,
                   const char *hash);
 
+/** Store a typed object, compressing it with codec if that saves
+ *  enough space.  The object is hashed over its plaintext, so the
+ *  address is identical to cas_put_object regardless of whether
+ *  compression wins.  The compressed form is kept only when it
+ *  beats the raw size by a comfortable margin and an encoder for
+ *  codec is registered (see cas-codec.h); otherwise the object is
+ *  stored raw.  Already-compressed or incompressible data thus
+ *  costs nothing but a compression attempt.
+ *
+ *  Returns CAS_OK on success, CAS_ERR on a bad type/length, or an
+ *  I/O error code on write failure.
+ */
+int
+cas_put_object_z(struct cas *store, const char *type, int codec,
+                 const void *data, size_t len, char *hash_out);
+
+/** Store an already-compressed object at its plaintext hash
+ *  address without compressing, hashing, or decompressing.
+ *
+ *  codec is the codec tag (see cas-codec.h) describing payload;
+ *  payload/payload_len is the stored codec payload; plaintext_len
+ *  is the uncompressed length, which is what the header records
+ *  and what the address is derived from.  The caller supplies the
+ *  canonical hash, which is not recomputed or verified here.
+ *
+ *  This is the ingest path for pre-compressed downloads: the blob
+ *  stays small over the wire and on disk, and the client does no
+ *  compression work.  Reads transparently decode it, provided a
+ *  decoder for codec is registered.
+ *
+ *  Returns CAS_OK on success (or if the object already exists),
+ *  CAS_ERR on a bad hash or oversized header, CAS_EIO on I/O
+ *  failure.
+ */
+int
+cas_put_precompressed(struct cas *store, const char *type, int codec,
+                      const void *payload, size_t payload_len,
+                      size_t plaintext_len, const char *hash);
+
 /** Check whether an object with the given hex hash exists.
  *  Returns nonzero if present, 0 if not.
  */
 int
 cas_exists(struct cas *store, const char *hash);
+
+/** Low-level: open a loose object's raw on-disk data region
+ *  without decoding it.  cf->data points to the stored region
+ *  (codec framing intact for v2 objects) and cf->len is the
+ *  region length, not the plaintext length.  The 64-byte trailer
+ *  is copied to trailer_out (which must be at least
+ *  CAS_PACK_BLOCK bytes).  Used by the packer to roll objects up
+ *  without inflating compressed ones.  Close with cas_close.
+ *
+ *  Returns CAS_OK, CAS_ENOTFOUND if not a loose object, CAS_ERR
+ *  on a bad hash or malformed trailer, CAS_EIO on I/O failure.
+ */
+int
+cas_open_loose_raw(struct cas *store, struct cas_file *cf,
+                   const char *hash, void *trailer_out);
 
 /** Compute the raw BLAKE2b-256 hash of data without storing. */
 int
@@ -147,11 +210,14 @@ enum {
     CAS_FSCK_CORRUPT,
     CAS_FSCK_BADNAME,
     CAS_FSCK_IOERR,
+    CAS_FSCK_NOCODEC,  /* compressed, but no decoder to verify with */
 };
 
-/** Callback for cas_fsck.  Called for each object checked.
- *  status is one of CAS_FSCK_OK/CORRUPT/BADNAME/IOERR.
- *  Return 0 to continue, nonzero to stop.
+/** Callback for cas_fsck.  Called for each object checked.  status
+ *  is one of CAS_FSCK_OK/CORRUPT/BADNAME/IOERR/NOCODEC.  NOCODEC
+ *  means the object is compressed with a codec not compiled in, so
+ *  it could not be verified; it is reported but not counted as a
+ *  failure.  Return 0 to continue, nonzero to stop.
  */
 typedef int (*cas_fsck_fn)(const char *hash, int status, void *ctx);
 

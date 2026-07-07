@@ -5,6 +5,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas.h"
+#include "cas-codec.h"
+#include "cas-pack.h"
 #include "test.h"
 
 #include <stdlib.h>
@@ -405,6 +407,279 @@ test_cas_lifecycle(void)
 }
 
 /****************************************************************
+ * Pre-compressed ingest (v2 objects)
+ ****************************************************************/
+
+/* ingest a raw payload under the NONE codec: stored as a v2
+ * object but read back byte-for-byte at the plaintext address */
+static void
+test_ingest_none(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/ing_none", tmpdir);
+
+    struct cas *store = cas_new(depot);
+    const char *msg = "content-addressable storage";
+    size_t len = strlen(msg);
+
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", msg, len, hash);
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_NONE,
+                                        msg, len, len, hash), CAS_OK);
+    ASSERT(cas_exists(store, hash));
+
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_OK);
+    ASSERT_INT_EQ((int)cf.len, (int)len);
+    ASSERT(memcmp(cf.data, msg, len) == 0);
+    cas_close(&cf);
+
+    cas_free(store);
+}
+
+#ifdef CAS_WITH_MINIZ
+/* ingest a real DEFLATE payload and read it back decoded; the
+ * address is the plaintext hash, independent of the encoding */
+static void
+test_ingest_compressed(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/ing_z", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    char plain[512];
+    for (size_t i = 0; i < sizeof(plain); i++)
+        plain[i] = (char)('a' + (i % 4));
+    size_t len = sizeof(plain);
+
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", plain, len, hash);
+
+    /* encode the payload the way an offline producer would */
+    unsigned char payload[1024];
+    size_t plen = sizeof(payload);
+    ASSERT_INT_EQ(cas_codec_encode(CAS_CODEC_DEFLATE, plain, len,
+                                   payload, &plen), CAS_OK);
+    ASSERT(plen < len);
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_DEFLATE,
+                                        payload, plen, len, hash),
+                  CAS_OK);
+
+    /* the same content ingested twice is a dedup no-op */
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_DEFLATE,
+                                        payload, plen, len, hash),
+                  CAS_OK);
+
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_OK);
+    ASSERT_INT_EQ((int)cf.len, (int)len);
+    ASSERT(memcmp(cf.data, plain, len) == 0);
+    cas_close(&cf);
+
+    cas_free(store);
+}
+#endif
+
+/* an object stored under a codec with no registered decoder fails
+ * cleanly rather than returning garbage */
+static void
+test_ingest_unsupported(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/ing_unsup", tmpdir);
+
+    struct cas *store = cas_new(depot);
+    const char *msg = "unreadable";
+    size_t len = strlen(msg);
+
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", msg, len, hash);
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_ZSTD,
+                                        msg, len, len, hash), CAS_OK);
+    ASSERT(cas_exists(store, hash));
+
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_ETYPE);
+
+    cas_free(store);
+}
+
+#ifdef CAS_WITH_MINIZ
+/* a v2 object whose header claims an absurd plaintext length is
+ * rejected before allocating, rather than triggering a huge malloc */
+static void
+test_decode_bomb_rejected(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/bomb", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    /* a tiny real DEFLATE payload */
+    unsigned char payload[64];
+    size_t plen = sizeof(payload);
+    ASSERT_INT_EQ(cas_codec_encode(CAS_CODEC_DEFLATE, "xxxxxxxx", 8,
+                                   payload, &plen), CAS_OK);
+
+    /* lie: claim the payload inflates to 100 MB */
+    size_t fake_len = 100u * 1024 * 1024;
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", "", 0, hash);   /* address is irrelevant here */
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_DEFLATE,
+                                        payload, plen, fake_len, hash),
+                  CAS_OK);
+
+    /* the ratio guard rejects it without allocating 100 MB */
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_ERR);
+
+    cas_free(store);
+}
+
+/* fsck decodes a v2 object and verifies the plaintext hash */
+static void
+test_fsck_compressed(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/fsck_z", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    char plain[256];
+    for (size_t i = 0; i < sizeof(plain); i++)
+        plain[i] = (char)('x' + (i % 3));
+    size_t len = sizeof(plain);
+
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", plain, len, hash);
+
+    unsigned char payload[512];
+    size_t plen = sizeof(payload);
+    ASSERT_INT_EQ(cas_codec_encode(CAS_CODEC_DEFLATE, plain, len,
+                                   payload, &plen), CAS_OK);
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_DEFLATE,
+                                        payload, plen, len, hash),
+                  CAS_OK);
+
+    ASSERT_INT_EQ(cas_fsck_object(store, hash), CAS_FSCK_OK);
+    ASSERT_INT_EQ(cas_fsck(store, NULL, NULL), CAS_OK);
+
+    cas_free(store);
+}
+#endif
+
+/* fsck cannot verify an object whose codec has no decoder */
+static void
+test_fsck_unsupported_codec(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/fsck_unsup", tmpdir);
+
+    struct cas *store = cas_new(depot);
+    const char *msg = "opaque";
+    size_t len = strlen(msg);
+
+    char hash[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", msg, len, hash);
+
+    ASSERT_INT_EQ(cas_put_precompressed(store, "blob", CAS_CODEC_ZSTD,
+                                        msg, len, len, hash), CAS_OK);
+
+    /* reported as a skip, and it does not fail the whole fsck */
+    ASSERT_INT_EQ(cas_fsck_object(store, hash), CAS_FSCK_NOCODEC);
+    ASSERT_INT_EQ(cas_fsck(store, NULL, NULL), CAS_OK);
+
+    cas_free(store);
+}
+
+/****************************************************************
+ * Write-side compression (cas_put_object_z)
+ ****************************************************************/
+
+#ifdef CAS_WITH_MINIZ
+/* compressible data is stored compressed at its plaintext address */
+static void
+test_put_z_compresses(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/put_z", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    unsigned char data[512];
+    memset(data, 'A', sizeof(data));
+
+    char hash[CAS_HASH_HEX + 1];
+    ASSERT_INT_EQ(cas_put_object_z(store, "blob", CAS_CODEC_DEFLATE, data,
+                                   sizeof(data), hash), CAS_OK);
+
+    /* address is the plaintext hash, same as an uncompressed put */
+    char expected[CAS_HASH_HEX + 1];
+    cas_hash_object("blob", data, sizeof(data), expected);
+    ASSERT_STR_EQ(hash, expected);
+
+    /* stored region is smaller than the plaintext */
+    struct cas_file raw;
+    unsigned char tr[CAS_PACK_BLOCK];
+    ASSERT_INT_EQ(cas_open_loose_raw(store, &raw, hash, tr), CAS_OK);
+    ASSERT(raw.len < sizeof(data));
+    cas_close(&raw);
+
+    /* and it reads back decoded */
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_OK);
+    ASSERT_INT_EQ((int)cf.len, (int)sizeof(data));
+    ASSERT(cf.data[0] == 'A' && cf.data[511] == 'A');
+    cas_close(&cf);
+
+    cas_free(store);
+}
+#endif
+
+/* incompressible data falls back to a raw store, still correct.
+ * With no encoder linked (default build) compression is skipped;
+ * under miniz an incompressible payload does not fit and is also
+ * stored raw.  Either way the object is correct. */
+static void
+test_put_z_fallback(void)
+{
+    char depot[512];
+    snprintf(depot, sizeof(depot), "%s/put_z_fb", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    /* all-distinct bytes do not compress within the raw size */
+    unsigned char data[256];
+    for (int i = 0; i < 256; i++)
+        data[i] = (unsigned char)i;
+
+    char hash[CAS_HASH_HEX + 1];
+    ASSERT_INT_EQ(cas_put_object_z(store, "blob", CAS_CODEC_DEFLATE, data,
+                                   sizeof(data), hash), CAS_OK);
+
+    /* stored raw: region equals the plaintext length */
+    struct cas_file raw;
+    unsigned char tr[CAS_PACK_BLOCK];
+    ASSERT_INT_EQ(cas_open_loose_raw(store, &raw, hash, tr), CAS_OK);
+    ASSERT_INT_EQ((int)raw.len, (int)sizeof(data));
+    cas_close(&raw);
+
+    struct cas_file cf;
+    ASSERT_INT_EQ(cas_open(store, &cf, hash), CAS_OK);
+    ASSERT_INT_EQ((int)cf.len, (int)sizeof(data));
+    ASSERT(memcmp(cf.data, data, sizeof(data)) == 0);
+    cas_close(&cf);
+
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -429,6 +704,16 @@ main(void)
     RUN(test_open_missing);
     RUN(test_cas_strerror);
     RUN(test_object_api);
+    RUN(test_ingest_none);
+    RUN(test_ingest_unsupported);
+    RUN(test_fsck_unsupported_codec);
+    RUN(test_put_z_fallback);
+#ifdef CAS_WITH_MINIZ
+    RUN(test_ingest_compressed);
+    RUN(test_decode_bomb_rejected);
+    RUN(test_fsck_compressed);
+    RUN(test_put_z_compresses);
+#endif
     RUN(test_fsck_clean);
     RUN(test_fsck_corrupt);
     RUN(test_fsck_empty_store);

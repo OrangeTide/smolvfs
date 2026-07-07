@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas-pack.h"
+#include "cas-codec.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -47,16 +48,6 @@ write_full(int fd, const void *data, size_t len)
 		len -= (size_t)n;
 	}
 	return CAS_OK;
-}
-
-static int
-format_header(char *buf, size_t bufsz, const char *type, size_t len)
-{
-	int n = snprintf(buf, bufsz, "%s %zu", type, len);
-
-	if (n < 0 || (size_t)n + 1 > bufsz)
-		return -1;
-	return n + 1;
 }
 
 static int
@@ -220,6 +211,12 @@ find_entry(const struct cas_pack *pack,
 	return NULL;
 }
 
+static void
+release_free(struct cas_file *cf)
+{
+	free(cf->_priv);
+}
+
 int
 cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
                 const char *hash, char *type_out,
@@ -246,11 +243,15 @@ cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
 		(const struct cas_pack_trailer *)
 		((char *)pack->map + trailer_off);
 
-	static const unsigned char trailer_magic[] =
-		CAS_PACK_TRAILER_MAGIC;
+	static const unsigned char magic_v1[] = CAS_PACK_TRAILER_MAGIC;
+	static const unsigned char magic_v2[] = CAS_PACK_TRAILER_MAGIC_V2;
+	int framed;
 
-	if (memcmp(tr->magic, trailer_magic,
-	           CAS_PACK_MAGIC_LEN) != 0)
+	if (memcmp(tr->magic, magic_v1, CAS_PACK_MAGIC_LEN) == 0)
+		framed = 0;
+	else if (memcmp(tr->magic, magic_v2, CAS_PACK_MAGIC_LEN) == 0)
+		framed = 1;
+	else
 		return CAS_ERR;
 
 	char type[CAS_TYPE_MAX + 1];
@@ -261,7 +262,13 @@ cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
 	                 &content_len) != CAS_OK)
 		return CAS_ERR;
 
-	if (content_len > trailer_off)
+	/* stored_size is the on-disk region length; a zero value
+	 * means "same as the plaintext length" for packs written
+	 * before compression existed. */
+	uint64_t region_size = e->stored_size ? e->stored_size
+	                                       : content_len;
+
+	if (region_size > trailer_off)
 		return CAS_ERR;
 
 	if (type_out) {
@@ -270,17 +277,30 @@ cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
 		memcpy(type_out, type, strlen(type) + 1);
 	}
 
-	cf->_map = NULL;
-	cf->_maplen = 0;
+	const unsigned char *region =
+		(const unsigned char *)pack->map + trailer_off - region_size;
+	const unsigned char *data;
+	size_t len;
+	unsigned char *owned;
+	int rc = cas_codec_region_decode(region, region_size, framed,
+	                                 content_len, &data, &len,
+	                                 &owned);
 
-	if (content_len == 0) {
-		cf->data = NULL;
-		cf->len = 0;
+	if (rc != CAS_OK)
+		return rc;
+
+	if (owned) {
+		cf->_priv = owned;
+		cf->_privlen = 0;
+		cf->_release = release_free;
 	} else {
-		cf->data = (const unsigned char *)pack->map +
-		           trailer_off - content_len;
-		cf->len = content_len;
+		/* zero-copy view into the packfile mmap */
+		cf->_priv = NULL;
+		cf->_privlen = 0;
+		cf->_release = NULL;
 	}
+	cf->data = data;
+	cf->len = len;
 	return CAS_OK;
 }
 
@@ -348,11 +368,18 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 			(const struct cas_pack_trailer *)
 			((char *)pack->map + trailer_off);
 
-		static const unsigned char trailer_magic[] =
+		static const unsigned char magic_v1[] =
 			CAS_PACK_TRAILER_MAGIC;
+		static const unsigned char magic_v2[] =
+			CAS_PACK_TRAILER_MAGIC_V2;
+		int framed;
 
-		if (memcmp(tr->magic, trailer_magic,
-		           CAS_PACK_MAGIC_LEN) != 0) {
+		if (memcmp(tr->magic, magic_v1, CAS_PACK_MAGIC_LEN) == 0)
+			framed = 0;
+		else if (memcmp(tr->magic, magic_v2,
+		                CAS_PACK_MAGIC_LEN) == 0)
+			framed = 1;
+		else {
 			status = CAS_FSCK_CORRUPT;
 			goto report;
 		}
@@ -367,18 +394,42 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 			goto report;
 		}
 
-		if (content_len > trailer_off) {
+		uint64_t region_size = e->stored_size ? e->stored_size
+		                                       : content_len;
+
+		if (region_size > trailer_off) {
 			status = CAS_FSCK_CORRUPT;
 			goto report;
 		}
 
-		const unsigned char *data =
+		const unsigned char *region =
 			(const unsigned char *)pack->map +
-			trailer_off - content_len;
+			trailer_off - region_size;
+		const unsigned char *data;
+		size_t len;
+		unsigned char *owned;
+		int rc = cas_codec_region_decode(region, region_size,
+		                                 framed, content_len,
+		                                 &data, &len, &owned);
+
+		if (rc == CAS_ETYPE) {
+			/* codec not compiled in: cannot verify */
+			status = CAS_FSCK_NOCODEC;
+			goto report;
+		}
+		if (rc == CAS_ENOMEM) {
+			status = CAS_FSCK_IOERR;
+			goto report;
+		}
+		if (rc != CAS_OK) {
+			status = CAS_FSCK_CORRUPT;
+			goto report;
+		}
 
 		unsigned char digest[CAS_HASH_LEN];
 
-		cas_digest_object(type, data, content_len, digest);
+		cas_digest_object(type, data, len, digest);
+		free(owned);
 
 		if (memcmp(digest, e->hash, CAS_HASH_LEN) != 0) {
 			status = CAS_FSCK_CORRUPT;
@@ -388,7 +439,8 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 		status = CAS_FSCK_OK;
 
 	report:
-		if (status != CAS_FSCK_OK)
+		/* NOCODEC is a skip, not a corruption */
+		if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC)
 			errors++;
 		if (fn && fn(hex, status, ctx) != 0)
 			break;
@@ -435,8 +487,13 @@ hash_cmp(const void *a, const void *b)
 	return memcmp(a, b, CAS_HASH_LEN);
 }
 
-int
-cas_pack_create(struct cas *store, const char *path)
+/* Build a packfile from all loose objects.  When codec is not
+ * CAS_CODEC_NONE and an encoder for it is available, each raw (v1)
+ * object is compressed into the packfile if that saves space;
+ * already-compressed objects are copied verbatim.  The address of
+ * every object is unchanged. */
+static int
+pack_create(struct cas *store, const char *path, int codec)
 {
 	struct hash_list hl = {0};
 
@@ -494,10 +551,12 @@ cas_pack_create(struct cas *store, const char *path)
 
 		cas_hex_encode(hl.hashes[i], CAS_HASH_LEN, hex);
 
+		/* copy the raw on-disk encoding verbatim so compressed
+		 * objects stay compressed and their trailer (v1 or v2
+		 * magic) is preserved unchanged */
 		struct cas_file cf;
-		char type[CAS_TYPE_MAX + 1];
-		int rc = cas_open_object(store, &cf, hex,
-		                         type, sizeof(type));
+		struct cas_pack_trailer tr;
+		int rc = cas_open_loose_raw(store, &cf, hex, &tr);
 
 		if (rc != CAS_OK) {
 			close(fd);
@@ -507,9 +566,60 @@ cas_pack_create(struct cas *store, const char *path)
 			return rc;
 		}
 
-		if (cf.len > 0) {
-			rc = write_full(fd, cf.data, cf.len);
+		char type[CAS_TYPE_MAX + 1];
+		size_t content_len;
+
+		if (parse_header(tr.header, CAS_PACK_HEADER_LEN,
+		                 type, sizeof(type),
+		                 &content_len) != CAS_OK) {
+			cas_close(&cf);
+			close(fd);
+			unlink(tmp);
+			free(index);
+			free(hl.hashes);
+			return CAS_ERR;
+		}
+
+		static const unsigned char magic_v2[] =
+			CAS_PACK_TRAILER_MAGIC_V2;
+		int framed_in = memcmp(tr.magic, magic_v2,
+		                       CAS_PACK_MAGIC_LEN) == 0;
+
+		/* bytes to write for this object: raw region by default */
+		const unsigned char *emit = cf.data;
+		uint64_t emit_size = cf.len;
+		unsigned char *scratch = NULL;
+
+		/* compress a raw object if a codec is requested and helps */
+		if (codec != CAS_CODEC_NONE && !framed_in && cf.len > 0 &&
+		    cas_codec_can_encode(codec)) {
+			scratch = malloc(cf.len + 1);
+			if (scratch) {
+				size_t plen = cf.len;
+				int erc = cas_codec_encode(codec, cf.data,
+				                           cf.len, scratch + 1,
+				                           &plen);
+
+				if (erc == CAS_OK &&
+				    plen + 1 < cf.len - cf.len / 8) {
+					scratch[0] = (unsigned char)codec;
+					emit = scratch;
+					emit_size = plen + 1;
+					/* header stays "type plaintext_len\0";
+					 * only the framing magic changes */
+					memcpy(tr.magic, magic_v2,
+					       CAS_PACK_MAGIC_LEN);
+				} else {
+					free(scratch);
+					scratch = NULL;
+				}
+			}
+		}
+
+		if (emit_size > 0) {
+			rc = write_full(fd, emit, emit_size);
 			if (rc != CAS_OK) {
+				free(scratch);
 				cas_close(&cf);
 				close(fd);
 				unlink(tmp);
@@ -518,31 +628,9 @@ cas_pack_create(struct cas *store, const char *path)
 				return rc;
 			}
 		}
-		offset += cf.len;
-
-		struct cas_pack_trailer tr;
-		static const unsigned char magic[] =
-			CAS_PACK_TRAILER_MAGIC;
-
-		memcpy(tr.magic, magic, CAS_PACK_MAGIC_LEN);
-		memset(tr.header, 0, CAS_PACK_HEADER_LEN);
-
-		char hdr[32];
-		int hdrlen = format_header(hdr, sizeof(hdr),
-		                           type, cf.len);
-
+		free(scratch);
 		cas_close(&cf);
-
-		if (hdrlen < 0 ||
-		    (size_t)hdrlen > CAS_PACK_HEADER_LEN) {
-			close(fd);
-			unlink(tmp);
-			free(index);
-			free(hl.hashes);
-			return CAS_ERR;
-		}
-
-		memcpy(tr.header, hdr, (size_t)hdrlen);
+		offset += emit_size;
 
 		rc = write_full(fd, &tr, sizeof(tr));
 		if (rc != CAS_OK) {
@@ -555,6 +643,11 @@ cas_pack_create(struct cas *store, const char *path)
 
 		memcpy(index[i].hash, hl.hashes[i], CAS_HASH_LEN);
 		index[i].offset = offset;
+		/* a compressed region differs from the plaintext length,
+		 * so record it; leave zero when they match for
+		 * compatibility with packs written before compression */
+		index[i].stored_size = (emit_size == content_len)
+		                       ? 0 : emit_size;
 
 		offset += CAS_PACK_BLOCK;
 	}
@@ -615,4 +708,16 @@ cas_pack_create(struct cas *store, const char *path)
 	}
 
 	return CAS_OK;
+}
+
+int
+cas_pack_create(struct cas *store, const char *path)
+{
+	return pack_create(store, path, CAS_CODEC_NONE);
+}
+
+int
+cas_pack_create_z(struct cas *store, const char *path, int codec)
+{
+	return pack_create(store, path, codec);
 }
