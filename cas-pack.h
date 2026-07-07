@@ -27,7 +27,11 @@
  * occupies [0, filesize - 64).
  *
  * Hash input: BLAKE2b-256("type len\0" || data).  The nul
- * padding in the trailer is not part of the hash input.
+ * padding in the trailer is not part of the hash input.  Here
+ * "data" is always the uncompressed plaintext: for a v2 trailer
+ * the on-disk data region is a codec tag byte plus payload, but
+ * the hash and the header len still describe the plaintext, so
+ * the object's address never depends on how it was stored.
  *
  * Packfile layout:
  *
@@ -54,8 +58,9 @@
 
 #define CAS_PACK_BLOCK     64
 
-#define CAS_PACK_TRAILER_MAGIC   { 0xCB, 0x4F, 0x42, 0x4A, 0xAA, 0x01, 0x00, 0x00 }
-#define CAS_PACK_FOOTER_MAGIC_V1 { 0xCB, 0x50, 0x4B, 0x46, 0xAA, 0x01, 0x00, 0x00 }
+#define CAS_PACK_TRAILER_MAGIC    { 0xCB, 0x4F, 0x42, 0x4A, 0xAA, 0x01, 0x00, 0x00 }
+#define CAS_PACK_TRAILER_MAGIC_V2 { 0xCB, 0x4F, 0x42, 0x4A, 0xAA, 0x02, 0x00, 0x00 }
+#define CAS_PACK_FOOTER_MAGIC_V1  { 0xCB, 0x50, 0x4B, 0x46, 0xAA, 0x01, 0x00, 0x00 }
 
 #define CAS_PACK_MAGIC_LEN  8
 #define CAS_PACK_HEADER_LEN 56  /* 64 - 8 magic */
@@ -70,6 +75,13 @@
  *  magic[8] + header[56 nul-padded]
  *  header contains "type len\0" padded with nul bytes to 56.
  *  Max type: 8 chars.  Max len: 18 digits (~4.6 EB).
+ *
+ *  Two magic values distinguish the data-region encoding.  The v1
+ *  magic (CAS_PACK_TRAILER_MAGIC) means the data region is the raw
+ *  plaintext.  The v2 magic (CAS_PACK_TRAILER_MAGIC_V2) means the
+ *  data region is a one-byte codec tag followed by the codec
+ *  payload; the header len is still the uncompressed length and
+ *  still the hash input, so the object's address is unchanged.
  */
 struct cas_pack_trailer {
 	unsigned char magic[CAS_PACK_MAGIC_LEN];
@@ -78,13 +90,18 @@ struct cas_pack_trailer {
 
 /** Packfile index entry -- one per object, sorted by hash.
  *
- *  hash[32] + offset[8] + reserved[24]
+ *  hash[32] + offset[8] + stored_size[8] + reserved[16]
  *  offset points to the start of the object's trailer.
+ *  stored_size is the on-disk data-region length, which differs
+ *  from the header (plaintext) length for compressed v2 objects.
+ *  A zero stored_size means "same as the header length" so packs
+ *  written before compression existed read back unchanged.
  */
 struct cas_pack_index_entry {
 	unsigned char hash[CAS_HASH_LEN];
 	uint64_t offset;
-	unsigned char reserved[24];
+	uint64_t stored_size;
+	unsigned char reserved[16];
 };
 
 /** Packfile footer -- last 64 bytes of the file.
@@ -133,9 +150,24 @@ cas_pack_close(struct cas_pack *pack);
 int
 cas_pack_create(struct cas *store, const char *path);
 
+/** Create a packfile, compressing objects with codec (a tag from
+ *  cas-codec.h) where that saves space.  Each raw object is
+ *  compressed into the packfile only if it beats its stored size
+ *  by a comfortable margin and an encoder for codec is compiled
+ *  in; already-compressed objects are copied unchanged.  Object
+ *  addresses are unaffected.  Pass CAS_CODEC_NONE for no
+ *  compression (identical to cas_pack_create).
+ *
+ *  Returns CAS_OK on success.
+ */
+int
+cas_pack_create_z(struct cas *store, const char *path, int codec);
+
 /** Look up an object in a packfile by hex hash.
- *  On success, cf->data and cf->len are set.  cf->_map is NULL;
- *  cas_close() is a no-op for packfile-backed objects.
+ *  On success, cf->data and cf->len are set.  For an uncompressed
+ *  object the data points into the packfile mmap and cas_close()
+ *  is a no-op; a compressed object is decoded into a heap buffer
+ *  that cas_close() frees.
  */
 int
 cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,

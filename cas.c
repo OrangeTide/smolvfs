@@ -6,6 +6,7 @@
 
 #include "cas.h"
 #include "cas-pack.h"
+#include "cas-codec.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -444,6 +445,22 @@ cas_hash_object(const char *type, const void *data, size_t len,
     return CAS_OK;
 }
 
+/****************************************************************
+ * cas_file teardown
+ ****************************************************************/
+
+static void
+release_munmap(struct cas_file *cf)
+{
+    munmap(cf->_priv, cf->_privlen);
+}
+
+static void
+release_free(struct cas_file *cf)
+{
+    free(cf->_priv);
+}
+
 int
 cas_open_object(struct cas *store, struct cas_file *cf,
                 const char *hash, char *type_out, size_t type_bufsz)
@@ -493,11 +510,15 @@ cas_open_object(struct cas *store, struct cas_file *cf,
         (const struct cas_pack_trailer *)
         ((char *)ptr + filesz - CAS_PACK_BLOCK);
 
-    static const unsigned char trailer_magic[] =
-        CAS_PACK_TRAILER_MAGIC;
+    static const unsigned char magic_v1[] = CAS_PACK_TRAILER_MAGIC;
+    static const unsigned char magic_v2[] = CAS_PACK_TRAILER_MAGIC_V2;
+    int framed;
 
-    if (memcmp(tr->magic, trailer_magic,
-               CAS_PACK_MAGIC_LEN) != 0) {
+    if (memcmp(tr->magic, magic_v1, CAS_PACK_MAGIC_LEN) == 0)
+        framed = 0;
+    else if (memcmp(tr->magic, magic_v2, CAS_PACK_MAGIC_LEN) == 0)
+        framed = 1;
+    else {
         munmap(ptr, filesz);
         return CAS_ERR;
     }
@@ -512,11 +533,6 @@ cas_open_object(struct cas *store, struct cas_file *cf,
         return CAS_ERR;
     }
 
-    if (content_len != filesz - CAS_PACK_BLOCK) {
-        munmap(ptr, filesz);
-        return CAS_ERR;
-    }
-
     if (type_out) {
         if (strlen(type) >= type_bufsz) {
             munmap(ptr, filesz);
@@ -525,16 +541,92 @@ cas_open_object(struct cas *store, struct cas_file *cf,
         memcpy(type_out, type, strlen(type) + 1);
     }
 
-    cf->_map = ptr;
-    cf->_maplen = filesz;
+    const unsigned char *data;
+    size_t len;
+    unsigned char *owned;
+    int rc = cas_codec_region_decode(ptr, filesz - CAS_PACK_BLOCK,
+                                     framed, content_len,
+                                     &data, &len, &owned);
 
-    if (content_len == 0) {
-        cf->data = NULL;
-        cf->len = 0;
-    } else {
-        cf->data = (const unsigned char *)ptr;
-        cf->len = content_len;
+    if (rc != CAS_OK) {
+        munmap(ptr, filesz);
+        return rc;
     }
+
+    if (owned) {
+        /* decoded into a heap buffer; the source is no longer needed */
+        munmap(ptr, filesz);
+        cf->_priv = owned;
+        cf->_privlen = 0;
+        cf->_release = release_free;
+    } else {
+        /* zero-copy view into the mmap */
+        cf->_priv = ptr;
+        cf->_privlen = filesz;
+        cf->_release = release_munmap;
+    }
+    cf->data = data;
+    cf->len = len;
+    return CAS_OK;
+}
+
+int
+cas_open_loose_raw(struct cas *store, struct cas_file *cf,
+                   const char *hash, void *trailer_out)
+{
+    if (!valid_hash(hash))
+        return CAS_ERR;
+
+    char path[CAS_PATH_MAX];
+
+    if (build_path(store, hash, path, sizeof(path)) != CAS_OK)
+        return CAS_ERR;
+
+    int fd = open(path, O_RDONLY);
+
+    if (fd < 0)
+        return CAS_ENOTFOUND;
+
+    struct stat sb;
+
+    if (fstat(fd, &sb) != 0) {
+        close(fd);
+        return CAS_EIO;
+    }
+
+    size_t filesz = (size_t)sb.st_size;
+
+    if (filesz < CAS_PACK_BLOCK) {
+        close(fd);
+        return CAS_ERR;
+    }
+
+    void *ptr = mmap(NULL, filesz, PROT_READ, MAP_PRIVATE, fd, 0);
+
+    close(fd);
+    if (ptr == MAP_FAILED)
+        return CAS_EIO;
+
+    const struct cas_pack_trailer *tr =
+        (const struct cas_pack_trailer *)
+        ((char *)ptr + filesz - CAS_PACK_BLOCK);
+
+    static const unsigned char magic_v1[] = CAS_PACK_TRAILER_MAGIC;
+    static const unsigned char magic_v2[] = CAS_PACK_TRAILER_MAGIC_V2;
+
+    if (memcmp(tr->magic, magic_v1, CAS_PACK_MAGIC_LEN) != 0 &&
+        memcmp(tr->magic, magic_v2, CAS_PACK_MAGIC_LEN) != 0) {
+        munmap(ptr, filesz);
+        return CAS_ERR;
+    }
+
+    memcpy(trailer_out, tr, CAS_PACK_BLOCK);
+
+    cf->_priv = ptr;
+    cf->_privlen = filesz;
+    cf->_release = release_munmap;
+    cf->data = (const unsigned char *)ptr;
+    cf->len = filesz - CAS_PACK_BLOCK;
     return CAS_OK;
 }
 
@@ -556,13 +648,13 @@ cas_open(struct cas *store, struct cas_file *cf, const char *hash)
 void
 cas_close(struct cas_file *cf)
 {
-    if (cf->_map) {
-        munmap(cf->_map, cf->_maplen);
-        cf->_map = NULL;
-    }
+    if (cf->_release)
+        cf->_release(cf);
     cf->data = NULL;
     cf->len = 0;
-    cf->_maplen = 0;
+    cf->_priv = NULL;
+    cf->_privlen = 0;
+    cf->_release = NULL;
 }
 
 int
@@ -727,6 +819,131 @@ cas_put_object_at(struct cas *store, const char *type,
 }
 
 int
+cas_put_precompressed(struct cas *store, const char *type, int codec,
+                      const void *payload, size_t payload_len,
+                      size_t plaintext_len, const char *hash)
+{
+    if (!valid_hash(hash) || codec < 0 || codec > 255)
+        return CAS_ERR;
+
+    /* an uncompressed payload must match the plaintext length */
+    if (codec == CAS_CODEC_NONE && payload_len != plaintext_len)
+        return CAS_ERR;
+
+    char hdr[CAS_HEADER_MAX];
+    int hdrlen = format_header(hdr, sizeof(hdr), type, plaintext_len);
+
+    if (hdrlen < 0 || (size_t)hdrlen > CAS_PACK_HEADER_LEN)
+        return CAS_ERR;
+
+    char path[CAS_PATH_MAX];
+    char dir[CAS_PATH_MAX];
+    char tmp[CAS_PATH_MAX];
+
+    if (build_path(store, hash, path, sizeof(path)) != CAS_OK)
+        return CAS_ERR;
+    if (build_dir(store, hash, dir, sizeof(dir)) != CAS_OK)
+        return CAS_ERR;
+
+    if (access(path, F_OK) == 0 ||
+        (store->pack && cas_pack_exists(store->pack, hash)))
+        return CAS_OK;
+
+    mkdir(store->basedir, 0755);
+    mkdir(dir, 0755);
+
+    if (snprintf(tmp, sizeof(tmp), "%s/.cas.XXXXXX", dir) >=
+        (int)sizeof(tmp))
+        return CAS_ERR;
+
+    int fd = mkstemp(tmp);
+
+    if (fd < 0)
+        return CAS_EIO;
+
+    /* data region: [ codec tag(1) | payload ] */
+    unsigned char cb = (unsigned char)codec;
+    int rc = write_full(fd, &cb, 1);
+
+    if (rc == CAS_OK && payload_len > 0)
+        rc = write_full(fd, payload, payload_len);
+    if (rc != CAS_OK) {
+        close(fd);
+        unlink(tmp);
+        return rc;
+    }
+
+    struct cas_pack_trailer tr;
+    static const unsigned char magic[] = CAS_PACK_TRAILER_MAGIC_V2;
+
+    memcpy(tr.magic, magic, CAS_PACK_MAGIC_LEN);
+    memset(tr.header, 0, CAS_PACK_HEADER_LEN);
+    memcpy(tr.header, hdr, (size_t)hdrlen);
+
+    rc = write_full(fd, &tr, sizeof(tr));
+    if (rc != CAS_OK) {
+        close(fd);
+        unlink(tmp);
+        return rc;
+    }
+
+    close(fd);
+
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        if (access(path, F_OK) != 0)
+            return CAS_EIO;
+    }
+
+    return CAS_OK;
+}
+
+int
+cas_put_object_z(struct cas *store, const char *type, int codec,
+                 const void *data, size_t len, char *hash_out)
+{
+    char hash[CAS_HASH_HEX + 1];
+
+    if (cas_hash_object(type, data, len, hash) != CAS_OK)
+        return CAS_ERR;
+
+    /* skip a pointless compression attempt on a known object */
+    if (cas_exists(store, hash)) {
+        memcpy(hash_out, hash, CAS_HASH_HEX + 1);
+        return CAS_OK;
+    }
+
+    /* try to compress; keep it only if the payload plus its one
+     * codec tag byte beats the raw size by more than ~12% */
+    if (codec != CAS_CODEC_NONE && len > 0 &&
+        cas_codec_can_encode(codec)) {
+        unsigned char *buf = malloc(len);
+
+        if (buf) {
+            size_t plen = len;
+            int rc = cas_codec_encode(codec, data, len, buf, &plen);
+
+            if (rc == CAS_OK && plen + 1 < len - len / 8) {
+                rc = cas_put_precompressed(store, type, codec, buf,
+                                           plen, len, hash);
+                free(buf);
+                if (rc == CAS_OK)
+                    memcpy(hash_out, hash, CAS_HASH_HEX + 1);
+                return rc;
+            }
+            free(buf);
+        }
+    }
+
+    /* not worth compressing: store raw at the same address */
+    int rc = cas_put_object_at(store, type, data, len, hash);
+
+    if (rc == CAS_OK)
+        memcpy(hash_out, hash, CAS_HASH_HEX + 1);
+    return rc;
+}
+
+int
 cas_put(struct cas *store, const void *data, size_t len,
         char *hash_out)
 {
@@ -807,91 +1024,61 @@ cas_foreach(struct cas *store, cas_foreach_fn fn, void *ctx)
 int
 cas_fsck_object(struct cas *store, const char *hash)
 {
-    char path[CAS_PATH_MAX];
-
     if (!valid_hash(hash))
         return CAS_FSCK_BADNAME;
-    if (build_path(store, hash, path, sizeof(path)) != CAS_OK)
-        return CAS_FSCK_BADNAME;
 
-    int fd = open(path, O_RDONLY);
+    struct cas_file cf;
+    struct cas_pack_trailer tr;
+    int rc = cas_open_loose_raw(store, &cf, hash, &tr);
 
-    if (fd < 0)
+    if (rc == CAS_ENOTFOUND || rc == CAS_EIO)
         return CAS_FSCK_IOERR;
-
-    struct stat sb;
-
-    if (fstat(fd, &sb) != 0) {
-        close(fd);
-        return CAS_FSCK_IOERR;
-    }
-
-    size_t filesz = (size_t)sb.st_size;
-
-    if (filesz < CAS_PACK_BLOCK) {
-        close(fd);
+    if (rc != CAS_OK)
         return CAS_FSCK_CORRUPT;
-    }
 
-    void *ptr = mmap(NULL, filesz, PROT_READ, MAP_PRIVATE, fd, 0);
-
-    close(fd);
-    if (ptr == MAP_FAILED)
-        return CAS_FSCK_IOERR;
-
-    const struct cas_pack_trailer *tr =
-        (const struct cas_pack_trailer *)
-        ((char *)ptr + filesz - CAS_PACK_BLOCK);
-
-    static const unsigned char trailer_magic[] =
-        CAS_PACK_TRAILER_MAGIC;
-
-    if (memcmp(tr->magic, trailer_magic,
-               CAS_PACK_MAGIC_LEN) != 0) {
-        munmap(ptr, filesz);
-        return CAS_FSCK_CORRUPT;
-    }
+    static const unsigned char magic_v2[] = CAS_PACK_TRAILER_MAGIC_V2;
+    int framed = memcmp(tr.magic, magic_v2, CAS_PACK_MAGIC_LEN) == 0;
 
     char type[CAS_TYPE_MAX + 1];
     size_t content_len;
 
-    if (parse_header(tr->header, CAS_PACK_HEADER_LEN,
-                     type, sizeof(type),
-                     &content_len) != CAS_OK) {
-        munmap(ptr, filesz);
+    if (parse_header(tr.header, CAS_PACK_HEADER_LEN,
+                     type, sizeof(type), &content_len) != CAS_OK) {
+        cas_close(&cf);
         return CAS_FSCK_CORRUPT;
     }
 
-    if (content_len != filesz - CAS_PACK_BLOCK) {
-        munmap(ptr, filesz);
+    /* decode to plaintext, then rehash "type len\0" || plaintext */
+    const unsigned char *data;
+    size_t len;
+    unsigned char *owned;
+
+    rc = cas_codec_region_decode(cf.data, cf.len, framed, content_len,
+                                 &data, &len, &owned);
+    if (rc == CAS_ETYPE) {
+        /* codec not compiled in: the object cannot be verified */
+        cas_close(&cf);
+        return CAS_FSCK_NOCODEC;
+    }
+    if (rc == CAS_ENOMEM) {
+        cas_close(&cf);
+        return CAS_FSCK_IOERR;
+    }
+    if (rc != CAS_OK) {
+        cas_close(&cf);
         return CAS_FSCK_CORRUPT;
     }
 
-    char hdr[CAS_HEADER_MAX];
-    int hdrlen = format_header(hdr, sizeof(hdr), type, content_len);
-
-    if (hdrlen < 0) {
-        munmap(ptr, filesz);
-        return CAS_FSCK_CORRUPT;
-    }
-
-    struct blake2b state;
-    uint8_t digest[CAS_HASH_LEN];
-
-    blake2b_init(&state, CAS_HASH_LEN);
-    blake2b_update(&state, hdr, (size_t)hdrlen);
-    blake2b_update(&state, ptr, content_len);
-    blake2b_final(&state, digest);
-
+    unsigned char digest[CAS_HASH_LEN];
     char actual[CAS_HASH_HEX + 1];
 
+    cas_digest_object(type, data, len, digest);
     to_hex(digest, CAS_HASH_LEN, actual);
-    munmap(ptr, filesz);
 
-    if (strcmp(actual, hash) != 0)
-        return CAS_FSCK_CORRUPT;
+    free(owned);
+    cas_close(&cf);
 
-    return CAS_FSCK_OK;
+    return strcmp(actual, hash) == 0 ? CAS_FSCK_OK : CAS_FSCK_CORRUPT;
 }
 
 struct cas_fsck_ctx {
@@ -907,7 +1094,8 @@ fsck_visitor(const char *hash, void *ctx)
     struct cas_fsck_ctx *fc = ctx;
     int status = cas_fsck_object(fc->store, hash);
 
-    if (status != CAS_FSCK_OK)
+    /* NOCODEC is a skip, not a corruption: reported, not counted */
+    if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC)
         fc->errors++;
     if (fc->fn)
         return fc->fn(hash, status, fc->ctx);
