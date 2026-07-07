@@ -39,13 +39,14 @@ A published depot is a set of static files under a base URL. Two layouts
 are supported; a server may offer either or both.
 
 ```
-<base>/refs/<name>              text file: 64 hex chars, the root address
-<base>/objects/<xx>/<hash>      one loose object (data region + trailer)
+<base>/refs/<name>.root         text file: 64 hex chars, the root address
+<base>/<xx>/<hash>              one loose object (data region + trailer)
 <base>/packs/<name>.pack        one packfile
 ```
 
-- `<xx>` is the first two hex characters of the address, matching the
-  local depot fan-out.
+- `<xx>` is the first two hex characters of the address. This layout is
+  exactly a local depot directory, so publishing a depot for the
+  loose-object transport is serving that directory as static files.
 - A loose object file is byte-identical to its local form: the data
   region followed by the 64-byte trailer.
 - A packfile is byte-identical to a local `pack.dat`. The pack transport
@@ -74,10 +75,12 @@ This yields git-style minimal fetching without any server participation.
 
 ## Discovery
 
-The client obtains the root address by fetching a ref:
+The client obtains the root address by fetching a ref's `.root` file
+(the atomically-updated current value; the sibling `.log` history and
+`.lock` file are local depot state and are not needed remotely):
 
 ```
-GET <base>/refs/<name>       ->  "8eb26db6...>"  (64 hex + newline)
+GET <base>/refs/<name>.root   ->  "8eb26db6...>"  (64 hex + newline)
 ```
 
 The root address is the entry point for the walk and the anchor of the
@@ -93,7 +96,7 @@ support is required.
 2. Maintain a work queue seeded with the root address.
 3. For each address in the queue:
    - If `cas_exists(address)` locally, skip it.
-   - Otherwise `GET <base>/objects/<xx>/<address>`, verify it (see
+   - Otherwise `GET <base>/<xx>/<address>`, verify it (see
      Trust), and write it into the local depot atomically.
    - If the object is a directory (`tree` or `htree`), parse it and
      enqueue every child address.
@@ -253,7 +256,7 @@ then verified by address.
 A client caches snapshot `main` from `https://cdn.example/depot`.
 
 ```
-GET /depot/refs/main
+GET /depot/refs/main.root
     -> 8eb26db6ab39...            (root address)
 
 GET /depot/packs/main.pack   Range: bytes=-64
@@ -282,7 +285,7 @@ record ref main -> 8eb26db6ab39...   (only now)
 
 ```
 fetch_snapshot(base, refname):
-    root = GET base/refs/refname
+    root = GET base/refs/refname.root
     if base advertises byte ranges and a pack is published:
         idx   = fetch_pack_index(base, pack)        # 2 range requests
         verify_footer_checksum(idx)
@@ -298,7 +301,7 @@ fetch_snapshot(base, refname):
         while queue:
             a = queue.pop()
             if cas_exists(a): continue
-            obj = GET base/objects/<xx(a)>/a
+            obj = GET base/<xx(a)>/a
             verify(obj); store(obj)
             if is_dir(obj): queue += children(obj)
     record_ref_local(refname, root)                 # last

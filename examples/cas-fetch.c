@@ -271,7 +271,7 @@ main(int argc, char **argv)
     char url[MAX_URL];
     char root[CAS_HASH_HEX + 1];
 
-    if (snprintf(url, sizeof(url), "%s/refs/%s", base, ref) >=
+    if (snprintf(url, sizeof(url), "%s/refs/%s.root", base, ref) >=
             (int)sizeof(url)) {
         fprintf(stderr, "url too long\n");
         goto out;
@@ -298,7 +298,7 @@ main(int argc, char **argv)
         if (cas_exists(store, hash))
             continue;  /* already cached (prior run or shared object) */
 
-        if (snprintf(url, sizeof(url), "%s/objects/%.2s/%s",
+        if (snprintf(url, sizeof(url), "%s/%.2s/%s",
                      base, hash, hash) >= (int)sizeof(url)) {
             fprintf(stderr, "url too long\n");
             goto out;

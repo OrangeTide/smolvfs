@@ -319,10 +319,11 @@ A depot is a directory. These paths are local repository state, not part
 of any transported bundle:
 
 ```
-<depot>/<xx>/<hash>      loose objects (xx = first two hex chars)
-<depot>/pack.dat         optional packfile, read transparently
-<depot>/refs/<name>      a ref: a file holding a 64-hex root address
-<depot>/refs/<name>.log  append-only commit log for that ref
+<depot>/<xx>/<hash>       loose objects (xx = first two hex chars)
+<depot>/pack.dat          optional packfile, read transparently
+<depot>/refs/<name>.root  a ref: a file holding a 64-hex root address
+<depot>/refs/<name>.log   append-only commit log for that ref
+<depot>/refs/<name>.lock  lock file guarding ref updates
 ```
 
 When present, `pack.dat` is consulted alongside loose objects: a lookup
