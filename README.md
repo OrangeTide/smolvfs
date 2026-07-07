@@ -198,9 +198,10 @@ hex hash may be used.
 
 **Reclaiming disk space:** the natural maintenance cycle is `gc` (drop
 unreachable objects), then `pack -z` (roll the rest into one compressed
-packfile).  `-z` compresses each object into the packfile where that
-saves space, leaving already-compressed content untouched, so a run of
-`gc` + `pack -z` is the usual way to shrink a depot on disk:
+packfile).  `-z` applies the `CAS_COMPRESS_GUESS` policy, compressing
+text-like objects into the packfile where that saves space and leaving
+binary or already-compressed content untouched, so a run of `gc` +
+`pack -z` is the usual way to shrink a depot on disk:
 
 ```sh
 castool gc
@@ -961,16 +962,19 @@ no loose objects, returns `CAS_OK` without creating a file.
 
 ```c
 int
-cas_pack_create_z(struct cas *store, const char *path, int codec);
+cas_pack_create_z(struct cas *store, const char *path, int policy,
+                  int codec);
 ```
 
 Like `cas_pack_create`, but compresses objects with `codec` (a tag from
-`cas-codec.h`) into the packfile where that saves space.  Each raw
-object is compressed only if it beats its stored size by a comfortable
-margin and an encoder for `codec` is compiled in; already-compressed
+`cas-codec.h`) under `policy` (a `CAS_COMPRESS_*` mode) into the
+packfile where that saves space.  A raw object is compressed only if
+the policy selects it, it beats its stored size by a comfortable
+margin, and an encoder for `codec` is compiled in; already-compressed
 objects are copied unchanged.  Object addresses are unaffected.  Pass
-`CAS_CODEC_NONE` for no compression.  This backs `castool pack -z` and
-the `gc` + `pack -z` disk-reclaim cycle.
+`CAS_COMPRESS_NEVER` for no compression.  This backs `castool pack -z`
+(which uses `CAS_COMPRESS_GUESS`) and the `gc` + `pack -z` disk-reclaim
+cycle.
 
 **Returns:** `CAS_OK` on success.
 
