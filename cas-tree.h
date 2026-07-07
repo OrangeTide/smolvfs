@@ -127,6 +127,7 @@ enum {
     CAS_TREE_FSCK_MISSING,
     CAS_TREE_FSCK_CORRUPT,
     CAS_TREE_FSCK_BAD_TREE,
+    CAS_TREE_FSCK_NOCODEC,  /* compressed blob, no decoder to verify */
 };
 
 /** Callback for cas_tree_fsck.

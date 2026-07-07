@@ -1067,6 +1067,8 @@ fsck_verify_tree_object(struct cas_tree *ct, const char *hash)
 
     if (rc == CAS_ENOTFOUND)
         return CAS_FSCK_IOERR;
+    if (rc == CAS_ETYPE)
+        return CAS_FSCK_NOCODEC;  /* compressed, no decoder */
     if (rc != CAS_OK)
         return CAS_FSCK_CORRUPT;
 
@@ -1129,6 +1131,13 @@ fsck_tree(struct cas_tree *ct, const char *path,
 {
     int status = fsck_verify_tree_object(ct, tree_hash);
 
+    if (status == CAS_FSCK_NOCODEC) {
+        /* compressed tree, no decoder: a skip.  Cannot descend into
+         * a tree we cannot decode, so this subtree is left unchecked. */
+        if (fn && fn(path, tree_hash, CAS_TREE_FSCK_NOCODEC, ctx))
+            return 1;
+        return 0;
+    }
     if (status == CAS_FSCK_IOERR) {
         (*errors)++;
         if (fn && fn(path, tree_hash, CAS_TREE_FSCK_MISSING, ctx))
@@ -1171,7 +1180,14 @@ fsck_tree(struct cas_tree *ct, const char *path,
             }
         } else {
             status = cas_fsck_object(cas_tree_cas(ct), e->hash);
-            if (status == CAS_FSCK_IOERR) {
+            if (status == CAS_FSCK_NOCODEC) {
+                /* compressed blob, no decoder: a skip, not an error */
+                if (fn && fn(childpath, e->hash,
+                             CAS_TREE_FSCK_NOCODEC, ctx)) {
+                    cas_tree_dir_free(&dir);
+                    return 1;
+                }
+            } else if (status == CAS_FSCK_IOERR) {
                 (*errors)++;
                 if (fn && fn(childpath, e->hash,
                              CAS_TREE_FSCK_MISSING, ctx)) {
