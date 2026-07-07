@@ -144,7 +144,7 @@ data region is the plaintext; for v2 it is `tag || payload`.
 ## Packfile
 
 A packfile rolls many objects and a search index into one file. It is
-the unit of transport: a "bundle" is simply a packfile. Layout:
+the unit of transport: a *bundle* is a packfile. Layout:
 
 ```
 [ obj0 data | obj0 trailer(64) ]
@@ -210,7 +210,7 @@ re-hashing against the index `hash`.
 A directory is a list of entries, each with a name, POSIX-style mode,
 owner/group ids, modification time, and the address of the child object
 (a `blob` for a file, a `tree`/`htree` for a subdirectory). Entries are
-**sorted ascending by name** (byte-wise) to make the encoding canonical:
+sorted ascending by name (byte-wise) to make the encoding canonical:
 the address of a directory depends only on its contents, not on
 insertion order.
 
@@ -239,8 +239,8 @@ followed by this payload.
 ### Htree (`htree`)
 
 A CDB-inspired hash table giving O(1) name lookup without parsing the
-whole directory. The object type is `htree`, but **its address is the
-address of the equivalent `tree`** (the sorted text form above), so a
+whole directory. The object type is `htree`, but its address is the
+address of the equivalent `tree` (the sorted text form above), so a
 producer computes the text serialization to derive the address and may
 then store either encoding at it. All integers are little-endian.
 
@@ -305,9 +305,8 @@ u32 adler32                   Adler-32 checksum over all bytes before
 **Adler-32.** The standard checksum: `a = 1, b = 0`; for each byte,
 `a = (a + byte) % 65521`, `b = (b + a) % 65521`; result `(b << 16) | a`.
 
-A reader distinguishes the two directory encodings by the object type
-(`tree` vs `htree`), not by content sniffing; the trailing `HTv1` magic
-and the adler32 confirm an htree's integrity.
+A reader selects the parser by object type (`tree` vs `htree`), never by
+sniffing content.
 
 ## Object map
 
@@ -332,11 +331,12 @@ directory trees) so they are reachable and survive garbage collection.
 
 ## Bundles and interoperation
 
-A packfile is self-contained and portable (little-endian, self-checksummed),
-so it doubles as a transport bundle. A producer packs the objects
-reachable from a root and ships the file plus the root's hex address. A
-consumer merges the objects into its depot, deduplicated by address, and
-records a ref at the shipped root.
+A packfile carries its own index and BLAKE2b checksum and stores every
+integer little-endian, so it reads identically on any machine, which
+makes it usable directly as a transport bundle. A producer packs the
+objects reachable from a root and ships the file plus the root's hex
+address. A consumer merges the objects into its depot, deduplicated by
+address, and records a ref at the shipped root.
 
 A conforming consumer:
 
@@ -344,9 +344,7 @@ A conforming consumer:
 - Re-hashes each self-addressed object (`blob`, `tree`, compressed
   blobs after decoding) against its index hash and rejects a mismatch.
 - Stores an `htree` object verbatim at its index address without the
-  re-hash check, relying on the index checksum and the htree's adler32,
-  because the htree address commits to the text form rather than to the
-  htree bytes.
+  re-hash check (see Re-encoded, above).
 - Skips objects it already holds.
 
 A producer must sort directory entries by name, must compute directory
