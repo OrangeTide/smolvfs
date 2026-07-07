@@ -88,6 +88,14 @@ cas-omap.o : cas-omap.c
 	$(compile.c)
 castool.o : castool.c
 	$(compile.c)
+# Print the library version from version.h (the single source of truth).
+# CI compares this to the pushed v* tag; a future vendoring script can
+# stamp it into the copied tree.
+version:
+	@printf '%s.%s.%s\n' \
+	  "$$(sed -n 's/^#define SMOLVFS_VERSION_MAJOR[[:space:]]*//p' version.h)" \
+	  "$$(sed -n 's/^#define SMOLVFS_VERSION_MINOR[[:space:]]*//p' version.h)" \
+	  "$$(sed -n 's/^#define SMOLVFS_VERSION_PATCH[[:space:]]*//p' version.h)"
 clean:
 	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) cas-codec-miniz.o third_party/miniz.o
 clean-all: clean
@@ -107,5 +115,5 @@ coverage: clean-all coverage-clean
 coverage-clean:
 	$(RM) -r coverage-html coverage.info *.gcda *.gcno
 
-.PHONY: all clean clean-all test smoke run coverage coverage-clean
+.PHONY: all clean clean-all test smoke run coverage coverage-clean version
 -include $(DEPS)

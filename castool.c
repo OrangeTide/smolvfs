@@ -7,6 +7,7 @@
 #include "cas-tree.h"
 #include "cas-pack.h"
 #include "cas-codec.h"
+#include "version.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -1015,9 +1016,11 @@ static const struct command commands[] = {
 static void
 usage(void)
 {
+	fprintf(stderr, "castool (smolvfs %s)\n\n", SMOLVFS_VERSION);
 	fprintf(stderr,
-	        "usage: %s [-d depot] <command> [args...]\n\n",
-	        progname);
+	        "usage: %s [-d depot] <command> [args...]\n"
+	        "       %s -V        print version\n\n",
+	        progname, progname);
 	fprintf(stderr, "commands:\n");
 	for (size_t i = 0; i < NCOMMANDS; i++)
 		fprintf(stderr, "  %-10s %s\n", commands[i].name,
@@ -1033,11 +1036,14 @@ main(int argc, char **argv)
 	const char *depot = "depot";
 	int opt;
 
-	while ((opt = getopt(argc, argv, "d:h")) != -1) {
+	while ((opt = getopt(argc, argv, "d:hV")) != -1) {
 		switch (opt) {
 		case 'd':
 			depot = optarg;
 			break;
+		case 'V':
+			printf("%s\n", SMOLVFS_VERSION);
+			return 0;
 		case 'h':
 			usage();
 			return 0;
