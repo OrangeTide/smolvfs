@@ -185,7 +185,7 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `cat` | `cat <hash>` | Print the raw body of any object (blob or tree) |
 | `ls` | `ls <ref-or-hash>` | List entries in a tree (single level) |
 | `tree` | `tree <ref-or-hash>` | Recursively list a tree with full paths |
-| `import` | `import <ref> <file>...` | Import files into a ref, creating or updating the tree |
+| `import` | `import [-z] <ref> <file>...` | Import files into a ref; `-z` compresses text-like files |
 | `export` | `export <ref-or-hash> <destdir>` | Export a tree to a directory, preserving permissions |
 | `rm` | `rm <ref> <name>...` | Remove named entries from a ref's tree |
 | `hash` | `hash [file]` | Compute the blob hash of a file (or stdin) |
@@ -213,6 +213,14 @@ prints a warning and packs uncompressed.  A depot packed with `-z` can
 only be read by a build that has the matching decoder; `fsck` from a
 build without it reports such objects as `skipped (no codec)` rather
 than failing.
+
+Alternatively, `import -z` compresses at ingest time instead of at
+pack time.  It applies the `CAS_COMPRESS_GUESS` policy (see the CAS
+codec table), compressing text-like files and leaving binary content
+raw, so importing a mix of source and media only pays compression on
+what benefits.  Both paths store blobs at their plaintext address, so
+they interoperate: an object imported with `-z` and later packed is
+already compressed and copied through unchanged.
 
 **@file expansion:** any argument starting with `@` is expanded to lines read
 from the named file (`@files.txt` reads `files.txt`, one argument per line).
@@ -851,6 +859,33 @@ int cas_codec_can_encode(int codec);   /* encoder available? */
 Report whether the codec table has a decoder or encoder for a tag.
 `CAS_CODEC_NONE` is always available.
 
+```c
+int cas_codec_policy(int policy, int codec, const void *data, size_t len);
+```
+
+Decide whether to attempt compression for a blob, returning
+`CAS_CODEC_NONE` (store raw) or `codec` (attempt it, subject to the
+`cas_put_object_z` size threshold).  The library keeps this policy
+minimal and leaves the real authority with the caller, who picks
+`policy`:
+
+- `CAS_COMPRESS_NEVER` -- never compress.
+- `CAS_COMPRESS_ALWAYS` -- always attempt.
+- `CAS_COMPRESS_GUESS` -- attempt only if the data looks like text.
+
+`GUESS` is a data-only heuristic (no filename, no format list): it
+examines the fraction of non-text control bytes in the first
+`CAS_TEXT_SNIFF` (512) bytes and treats data above
+`CAS_TEXT_MAX_NONTEXT_PCT` (10%) as binary.  Text (source, JSON, XML,
+CSV, logs) compresses; already-compressed binary (images, audio,
+video, archives) is skipped without a wasted attempt.  Both bounds are
+compile-time overridable.  Callers use it as:
+
+```c
+int use = cas_codec_policy(policy, CAS_CODEC_DEFLATE, data, len);
+cas_put_object_z(store, "blob", use, data, len, hash);
+```
+
 An application that wants its own codec (for example its own zlib
 instead of the bundled miniz) declares its functions and defines
 `CAS_CODEC_USER` when compiling `cas-codec.c`.  Each `X` entry becomes
@@ -1432,6 +1467,21 @@ vfs_snap_store(struct vfs *fs, const struct vfs_cred *cred,
 
 Recursively store the entire VFS state as CAS tree objects.  Returns the
 root tree hash in `hash_out`.
+
+```c
+int
+vfs_snap_store_z(struct vfs *fs, const struct vfs_cred *cred,
+                 struct cas_tree *ct, int policy, int codec,
+                 char *hash_out);
+```
+
+Like `vfs_snap_store`, but compresses file blobs according to `policy`
+(a `CAS_COMPRESS_*` mode) with `codec`.  Because blobs are stored at
+their plaintext address, the tree hashes are identical to an
+uncompressed snapshot, and unchanged files are not recompressed on a
+repeat snapshot (they already exist).  Restoring needs the matching
+decoder compiled in.  There is a matching `vfs_snap_commit_z` that
+snapshots with compression and commits to a ref.
 
 ```c
 int
