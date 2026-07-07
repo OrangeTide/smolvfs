@@ -1,0 +1,30 @@
+name: Release
+
+# Gates a v* tag on the source version matching the tag and on a green
+# build.  Push a tag like v0.1.0 after bumping version.h.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version.h matches the tag
+        run: |
+          src="$(make -s version)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "version.h: $src"
+          echo "git tag:   $GITHUB_REF_NAME"
+          if [ "$src" != "$tag" ]; then
+            echo "::error::version.h ($src) does not match tag $GITHUB_REF_NAME; bump version.h or fix the tag"
+            exit 1
+          fi
+
+      - name: Build and test
+        run: |
+          make clean && make test
+          make clean && make MINIZ=1 test
