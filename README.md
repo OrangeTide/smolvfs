@@ -61,6 +61,13 @@ Pack format).  Useful on its own for:
 - Caching build artifacts or computed results by content hash.
 - Any scenario where immutable, hash-indexed blobs are a good fit.
 
+The exact byte layout of every on-disk structure (object addressing,
+loose objects, packfiles/bundles, and the tree/htree directory formats)
+is specified in [FORMAT.md](FORMAT.md); the object map has its own
+[cas-omap.md](cas-omap.md).  Read those to build an interoperating
+producer or consumer, for example a server that ships bundles to a
+smolvfs client.
+
 ## Usage
 
 ### Adding to your project
