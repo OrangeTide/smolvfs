@@ -52,7 +52,10 @@ objects to disk identified by their BLAKE2b-256 digest (32 bytes, 64 hex
 characters).  Writes are atomic (mkstemp + rename), reads are mmap-based,
 and duplicate writes are automatically deduplicated.  The CAS module
 includes its own embedded BLAKE2b-256 implementation (RFC 7693) so it has
-zero external dependencies.  Useful on its own for:
+zero external dependencies.  Objects may optionally be stored compressed
+while keeping their uncompressed address, so pre-compressed data can be
+ingested without a client-side compression step (see Compression under
+Pack format).  Useful on its own for:
 
 - Deduplicating asset or document storage.
 - Caching build artifacts or computed results by content hash.
@@ -65,13 +68,18 @@ zero external dependencies.  Useful on its own for:
 Copy the files you need into your source tree:
 
 - **VFS only:** `vfs.h`, `vfs.c`
-- **CAS only:** `cas.h`, `cas.c`, `cas-pack.h`, `cas-pack.c`
-- **CAS + trees:** `cas.h`, `cas.c`, `cas-pack.h`, `cas-pack.c`, `cas-tree.h`, `cas-tree.c`
+- **CAS only:** `cas.h`, `cas.c`, `cas-pack.h`, `cas-pack.c`, `cas-codec.h`, `cas-codec.c`
+- **CAS + trees:** the CAS files above plus `cas-tree.h`, `cas-tree.c`
 - **Everything:** all files
 
 The VFS module is fully independent (pure in-memory, no disk I/O).  The
-CAS module depends on CAS-Pack.  The CAS-Tree module depends on CAS.
-Using the VFS with a CAS-Tree backend requires all three.
+CAS module depends on CAS-Pack and CAS-Codec.  The CAS-Tree module
+depends on CAS.  Using the VFS with a CAS-Tree backend requires all
+three.  The CAS-Codec module is a small self-contained compression
+codec table; on its own it pulls in no compression library.  To
+enable the optional bundled DEFLATE codec, also compile
+`cas-codec-miniz.c` with `third_party/miniz.c` and define
+`-DCAS_WITH_MINIZ` (the Makefile does this with `make MINIZ=1`).
 
 ### Compiling
 
@@ -183,10 +191,28 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `hash` | `hash [file]` | Compute the blob hash of a file (or stdin) |
 | `fsck` | `fsck` | Verify integrity of all reachable trees and blobs |
 | `gc` | `gc` | Remove unreachable objects older than one hour |
-| `pack` | `pack` | Pack loose objects into `pack.dat` |
+| `pack` | `pack [-z]` | Pack loose objects into `pack.dat`; `-z` compresses |
 
 Where a command accepts `<ref-or-hash>`, either a ref name or a 64-character
 hex hash may be used.
+
+**Reclaiming disk space:** the natural maintenance cycle is `gc` (drop
+unreachable objects), then `pack -z` (roll the rest into one compressed
+packfile).  `-z` compresses each object into the packfile where that
+saves space, leaving already-compressed content untouched, so a run of
+`gc` + `pack -z` is the usual way to shrink a depot on disk:
+
+```sh
+castool gc
+castool pack -z
+```
+
+`pack -z` compresses with the bundled DEFLATE codec, so `castool` must
+be built with it (`make MINIZ=1`); without a codec compiled in, `-z`
+prints a warning and packs uncompressed.  A depot packed with `-z` can
+only be read by a build that has the matching decoder; `fsck` from a
+build without it reports such objects as `skipped (no codec)` rather
+than failing.
 
 **@file expansion:** any argument starting with `@` is expanded to lines read
 from the named file (`@files.txt` reads `files.txt`, one argument per line).
@@ -744,10 +770,102 @@ cas_open_object(struct cas *store, struct cas_file *cf,
 
 Open any object by hash, regardless of type.  On success, `cf->data` and
 `cf->len` contain the body (after the header), and the object type is
-copied to `type_out` (if non-NULL).
+copied to `type_out` (if non-NULL).  A compressed object is decoded
+transparently, provided its codec is in the compile-time codec table;
+if not, this returns `CAS_ETYPE`.
 
 **Returns:** `CAS_OK` on success.  `CAS_ENOTFOUND` if the object does not
-exist.  `CAS_ERR` if the hash is malformed.
+exist.  `CAS_ETYPE` if the object's codec is not in the codec table.
+`CAS_ERR` if the hash is malformed.
+
+### CAS compression
+
+These entry points create or ingest compressed objects.  See the
+Compression section under Pack format for the on-disk format and the
+CAS codec table below for supplying codecs.
+
+```c
+int
+cas_put_object_z(struct cas *store, const char *type, int codec,
+                 const void *data, size_t len, char *hash_out);
+```
+
+Store a typed object, compressing it with `codec` when that saves
+enough space.  The object is hashed over its plaintext, so the address
+matches `cas_put_object` whether or not compression wins.  The
+compressed form is kept only when it beats the raw size by a comfortable
+margin and an encoder for `codec` is in the codec table; otherwise the object is
+stored raw.  Incompressible data therefore costs only a compression
+attempt.
+
+**Returns:** `CAS_OK` on success.  `CAS_ERR` on a bad type or length.
+An I/O error code on write failure.
+
+```c
+int
+cas_put_precompressed(struct cas *store, const char *type, int codec,
+                      const void *payload, size_t payload_len,
+                      size_t plaintext_len, const char *hash);
+```
+
+Store an already-compressed object at its plaintext hash address
+without compressing, hashing, or decompressing.  `codec` is the codec
+tag describing `payload`; `plaintext_len` is the uncompressed length,
+which is what the header records and what the address derives from.  The
+caller supplies the canonical `hash`, which is not recomputed or
+verified here.  This is the ingest path for pre-compressed downloads.
+
+**Returns:** `CAS_OK` on success (or if the object already exists).
+`CAS_ERR` on a bad hash or oversized header.  `CAS_EIO` on I/O failure.
+
+```c
+int
+cas_open_loose_raw(struct cas *store, struct cas_file *cf,
+                   const char *hash, void *trailer_out);
+```
+
+Low-level: open a loose object's raw on-disk data region without
+decoding it.  `cf->data` points to the stored region (codec framing
+intact) and `cf->len` is the region length, not the plaintext length.
+The 64-byte trailer is copied to `trailer_out`.  Used by the packer to
+roll objects up without inflating compressed ones.  Close with
+`cas_close`.
+
+**Returns:** `CAS_OK` on success.  `CAS_ENOTFOUND` if not a loose
+object.  `CAS_ERR` on a bad hash or malformed trailer.  `CAS_EIO` on
+I/O failure.
+
+### CAS codec table
+
+Compression codecs are fixed at compile time (`cas-codec.h`).  There is
+no runtime registry and no global mutable state: the codec set is a
+`static const` table, so it is thread-safe by construction and needs no
+initialization step.  Only `CAS_CODEC_NONE` (`%`, raw) is intrinsic.
+The bundled DEFLATE codec is compiled in with `-DCAS_WITH_MINIZ`.
+
+```c
+int cas_codec_supported(int codec);    /* decoder available? */
+int cas_codec_can_encode(int codec);   /* encoder available? */
+```
+
+Report whether the codec table has a decoder or encoder for a tag.
+`CAS_CODEC_NONE` is always available.
+
+An application that wants its own codec (for example its own zlib
+instead of the bundled miniz) declares its functions and defines
+`CAS_CODEC_USER` when compiling `cas-codec.c`.  Each `X` entry becomes
+one table row:
+
+```c
+int myz_decode(const void *in, size_t inlen, void *out, size_t outlen);
+int myz_encode(const void *in, size_t inlen, void *out, size_t *outlen);
+
+#define CAS_CODEC_USER(X) \
+    X(CAS_CODEC_DEFLATE, myz_decode, myz_encode, "myzlib")
+```
+
+The bundled DEFLATE stream is zlib-wrapped, so a `Z` codec supplied
+this way interoperates with the bundled one and with a standard zlib.
 
 ### CAS binary hash helpers
 
@@ -803,6 +921,21 @@ cas_pack_create(struct cas *store, const char *path);
 
 Create a packfile from all loose objects in the store.  If the store has
 no loose objects, returns `CAS_OK` without creating a file.
+
+**Returns:** `CAS_OK` on success.
+
+```c
+int
+cas_pack_create_z(struct cas *store, const char *path, int codec);
+```
+
+Like `cas_pack_create`, but compresses objects with `codec` (a tag from
+`cas-codec.h`) into the packfile where that saves space.  Each raw
+object is compressed only if it beats its stored size by a comfortable
+margin and an encoder for `codec` is compiled in; already-compressed
+objects are copied unchanged.  Object addresses are unaffected.  Pass
+`CAS_CODEC_NONE` for no compression.  This backs `castool pack -z` and
+the `gc` + `pack -z` disk-reclaim cycle.
 
 **Returns:** `CAS_OK` on success.
 
@@ -885,11 +1018,15 @@ int
 cas_fsck(struct cas *store, cas_fsck_fn fn, void *ctx);
 ```
 
-Check integrity of all objects by rehashing each file and comparing to its
-filename.  Calls `fn` for each object with a status code (`CAS_FSCK_OK`,
-`CAS_FSCK_CORRUPT`, `CAS_FSCK_BADNAME`, `CAS_FSCK_IOERR`).
+Check integrity of all objects by decoding (if compressed) and rehashing
+each file, comparing to its filename.  Calls `fn` for each object with a
+status code (`CAS_FSCK_OK`, `CAS_FSCK_CORRUPT`, `CAS_FSCK_BADNAME`,
+`CAS_FSCK_IOERR`, `CAS_FSCK_NOCODEC`).  `CAS_FSCK_NOCODEC` means the
+object is compressed with a codec that is not compiled in, so it could
+not be verified; it is reported but not counted as a failure.
 
-**Returns:** `CAS_OK` if all objects passed, `CAS_ERR` if any failed.
+**Returns:** `CAS_OK` if all objects passed (skips do not fail the run),
+`CAS_ERR` if any object was corrupt or unreadable.
 
 ```c
 int
@@ -955,7 +1092,14 @@ exist as a loose file.
                         +---------------+     +---------------+
                         cas - content-        packfile format
                         addressable storage
-                                (on-disk structures)
+                             |          (on-disk structures)
+                             v
+                        +---------------+     +--------------------+
+                        |  cas-codec.h  |     |  cas-codec-miniz.c |
+                        |  cas-codec.c  |<----|  third_party/miniz |
+                        +---------------+     +--------------------+
+                        codec table           optional DEFLATE
+                        (only NONE built in)  (-DCAS_WITH_MINIZ)
 ```
 
 The VFS provides an in-memory filesystem API (usable standalone).  `castool`
@@ -1240,9 +1384,12 @@ cas_tree_fsck(struct cas_tree *ct, cas_tree_fsck_fn fn, void *ctx);
 
 Walk all refs, verify reachable tree structure and blobs.  Calls `fn`
 for each issue with a status code (`CAS_TREE_FSCK_OK`, `_MISSING`,
-`_CORRUPT`, `_BAD_TREE`).
+`_CORRUPT`, `_BAD_TREE`, `_NOCODEC`).  `_NOCODEC` marks a compressed
+object whose codec is not compiled in: it is reported as a skip, not
+counted as an error, and its subtree is left unchecked.
 
-**Returns:** `CAS_OK` if everything is clean, `CAS_ERR` on any issue.
+**Returns:** `CAS_OK` if everything is clean (skips do not fail the
+run), `CAS_ERR` on any issue.
 
 ```c
 int
@@ -1706,12 +1853,63 @@ covered by its own hash in the index.
 2. Fall back to loose object -- `stat()`, read trailer, data region.
 3. Either way the caller gets a `cas_file` with `data`, `len`, type.
 
-#### No compression
+#### Compression
 
-The packfile stores opaque blobs with no compression.  Applications
-that benefit from compression (e.g. JSON data) apply it before
-storing.  This keeps the storage layer simple and avoids wasting
-cycles on already-compressed content (PDFs, images, archives).
+Objects may be stored compressed while keeping the same address.
+The hash always covers the uncompressed content (`"type len\0" ||
+plaintext`), so compression is purely a property of the on-disk
+encoding, never of the object's identity.  Two encodings of the
+same content dedup to one address; the first writer wins.
+
+An object's trailer magic selects the data-region encoding:
+
+- **v1** (`CAS_PACK_TRAILER_MAGIC`): the data region is the raw
+  plaintext.  This is the default and is byte-identical to earlier
+  versions, so existing depots read back unchanged.
+- **v2** (`CAS_PACK_TRAILER_MAGIC_V2`): the data region is a
+  one-byte codec tag followed by the codec payload.  The trailer
+  `len` is still the uncompressed length and still the hash input.
+
+The codec tag is printable ASCII, mirroring the tree body sigil:
+`%` none (raw), `Z` DEFLATE, `S` zstd, `X` xz, `4` LZ4.  In a
+packfile the on-disk region length is recorded in the index
+entry's `stored_size` field (a zero means "same as the plaintext
+length", so pre-compression packs are unaffected).
+
+Codecs are fixed at compile time, and only `%` (none) is intrinsic.
+Any other codec is compiled into a `static const` table (see the
+CAS codec table below), so the core has no compression dependency
+and no runtime registry.  An optional bundled DEFLATE codec (miniz)
+is compiled in with `-DCAS_WITH_MINIZ`.  Reading an object whose
+codec is not in the table returns `CAS_ETYPE` rather than corrupt
+data.
+
+Because a compressed object's plaintext length comes from its
+trailer (which the address does not cover on an untrusted read),
+decoding caps how far an object may inflate before allocating:
+`CAS_CODEC_MAX_PLAINTEXT` (default 1 GiB) and `CAS_CODEC_MAX_RATIO`
+(default 4096:1), both compile-time overridable.  An object that
+claims to exceed either bound is rejected rather than triggering a
+large allocation.  The caps apply only to genuinely compressed
+codecs; raw and `%` objects are already bounded by their stored
+size.
+
+There are three ways to create compressed objects:
+
+- `cas_put_object_z` compresses on write, keeping the compressed
+  form only when it beats the raw size by a comfortable margin.
+  Already-compressed or incompressible data (PDFs, images,
+  archives) costs only a compression attempt and is stored raw.
+- `cas_put_precompressed` ingests an already-compressed payload at
+  its plaintext address without compressing, hashing, or
+  decompressing.  This is ideal for pre-compressed downloads: the
+  blob stays small over the wire and on disk, and the client does
+  no compression work.  The supplied hash is trusted, not
+  recomputed; verify untrusted sources lazily via a later read or
+  `fsck`, which decodes and rehashes.
+- The producer of a packfile or download may use any codec offline
+  (even an expensive `zstd --ultra` or `xz -9`), provided a
+  matching decoder is compiled in on the reading side.
 
 ### Future investigations
 
