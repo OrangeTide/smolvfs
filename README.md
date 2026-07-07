@@ -323,7 +323,22 @@ make clean        # remove object files
 make clean-all    # remove objects, binary, and dependency files
 make test         # run test.sh (if present)
 make run          # build and run smolvfs
+make version      # print the library version from version.h
 ```
+
+### Versioning
+
+`version.h` is the single source of truth for the library version. It
+defines `SMOLVFS_VERSION_MAJOR/MINOR/PATCH` and composes
+`SMOLVFS_VERSION` (`"MAJOR.MINOR.PATCH"`) from them, so vendored source
+is identifiable from that one header, and `castool -V` prints it.
+
+To cut a release, bump the numbers in `version.h`, commit, and tag the
+commit `v<MAJOR>.<MINOR>.<PATCH>` (for example `v0.1.0`). The `Release`
+GitHub Actions workflow triggers on any `v*` tag and fails if the tag's
+number does not exactly match `version.h`, so a mistagged or unbumped
+release is rejected rather than published. The tag must match exactly;
+pre-release suffixes like `v0.1.0-rc1` are not accepted as-is.
 
 ### Compiler flags
 
