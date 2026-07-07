@@ -291,6 +291,121 @@ test_pack_create_z(void)
 	free(buf);
 	cas_free(store);
 }
+
+/* cas_pack_create_z under ALWAYS on incompressible data: the encoder
+ * is attempted, expands the data past the save-space margin, so the
+ * object is kept raw and still decodes.  This is the path GUESS skips
+ * before ever calling the encoder. */
+static void
+test_pack_create_z_always(void)
+{
+	char depot[512], packpath[512];
+
+	snprintf(depot, sizeof(depot), "%s/create_z_always", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
+	         depot);
+
+	struct cas *store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	/* high-entropy bytes (xorshift64star) that DEFLATE cannot
+	 * shrink, so the packer's save-space margin rejects the
+	 * attempt even though ALWAYS asked for it */
+	unsigned char rnd[4096];
+	uint64_t s = 0x9e3779b97f4a7c15ULL;
+	for (size_t i = 0; i < sizeof(rnd); i++) {
+		s ^= s >> 12;
+		s ^= s << 25;
+		s ^= s >> 27;
+		rnd[i] = (unsigned char)((s * 0x2545f4914f6cdd1dULL) >> 56);
+	}
+	char rhash[CAS_HASH_HEX + 1];
+	ASSERT_INT_EQ(cas_put(store, rnd, sizeof(rnd), rhash), CAS_OK);
+
+	ASSERT_INT_EQ(cas_pack_create_z(store, packpath, CAS_COMPRESS_ALWAYS,
+	              CAS_CODEC_DEFLATE), CAS_OK);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+
+	struct cas_file cf;
+	char type[CAS_TYPE_MAX + 1];
+
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, rhash, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, (int)sizeof(rnd));
+	ASSERT(memcmp(cf.data, rnd, sizeof(rnd)) == 0);
+	cas_close(&cf);
+
+	struct fsck_result fr = {0};
+	ASSERT_INT_EQ(cas_pack_fsck(pack, fsck_counter, &fr), CAS_OK);
+	ASSERT_INT_EQ(fr.ok, 1);
+	cas_pack_close(pack);
+
+	/* the attempt was rejected, so the object sits raw in the pack */
+	int fd = open(packpath, O_RDONLY);
+	ASSERT(fd >= 0);
+	off_t sz = lseek(fd, 0, SEEK_END);
+	lseek(fd, 0, SEEK_SET);
+	unsigned char *buf = malloc((size_t)sz);
+	ASSERT(buf != NULL);
+	ASSERT_INT_EQ((int)read(fd, buf, (size_t)sz), (int)sz);
+	close(fd);
+
+	ASSERT(contains(buf, (size_t)sz, rnd, sizeof(rnd)));
+
+	free(buf);
+	cas_free(store);
+}
+#else
+/****************************************************************
+ * test_pack_create_z_no_encoder
+ *
+ * With no codec compiled in, cas_pack_create_z must still succeed:
+ * every object is stored raw (the encoder-absent fallback) and reads
+ * back intact regardless of the policy requested.
+ ****************************************************************/
+
+static void
+test_pack_create_z_no_encoder(void)
+{
+	char depot[512], packpath[512];
+
+	snprintf(depot, sizeof(depot), "%s/create_z_noenc", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
+	         depot);
+
+	struct cas *store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	/* text that GUESS would want to compress if an encoder existed */
+	unsigned char text[4096];
+	memset(text, 'Q', sizeof(text));
+	char thash[CAS_HASH_HEX + 1];
+	ASSERT_INT_EQ(cas_put(store, text, sizeof(text), thash), CAS_OK);
+
+	ASSERT_INT_EQ(cas_pack_create_z(store, packpath, CAS_COMPRESS_GUESS,
+	              CAS_CODEC_DEFLATE), CAS_OK);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+
+	struct cas_file cf;
+	char type[CAS_TYPE_MAX + 1];
+
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, thash, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, (int)sizeof(text));
+	ASSERT(memcmp(cf.data, text, sizeof(text)) == 0);
+	cas_close(&cf);
+
+	struct fsck_result fr = {0};
+	ASSERT_INT_EQ(cas_pack_fsck(pack, fsck_counter, &fr), CAS_OK);
+	ASSERT_INT_EQ(fr.ok, 1);
+	cas_pack_close(pack);
+
+	cas_free(store);
+}
 #endif
 
 /****************************************************************
@@ -574,6 +689,9 @@ main(void)
 #ifdef CAS_WITH_MINIZ
 	RUN(test_pack_compressed);
 	RUN(test_pack_create_z);
+	RUN(test_pack_create_z_always);
+#else
+	RUN(test_pack_create_z_no_encoder);
 #endif
 	RUN(test_pack_lookup);
 	RUN(test_pack_exists);
