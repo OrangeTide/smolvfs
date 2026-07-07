@@ -66,7 +66,9 @@ loose objects, packfiles/bundles, and the tree/htree directory formats)
 is specified in [FORMAT.md](FORMAT.md); the object map has its own
 [cas-omap.md](cas-omap.md).  Read those to build an interoperating
 producer or consumer, for example a server that ships bundles to a
-smolvfs client.
+smolvfs client.  [DOWNLOAD.md](DOWNLOAD.md) describes an incremental
+CAS-over-HTTP protocol for fetching a snapshot from static hosting while
+downloading only the objects a client lacks.
 
 ## Usage
 
