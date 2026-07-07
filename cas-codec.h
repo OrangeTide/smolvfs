@@ -42,6 +42,39 @@ enum {
     CAS_CODEC_LZ4     = '4',  /* LZ4 */
 };
 
+/****************************************************************
+ * Compression policy
+ ****************************************************************
+ *
+ * A tool that ingests blobs decides per blob whether to attempt
+ * compression.  The library offers a minimal, data-only policy and
+ * leaves the real authority with the caller, who picks the mode.
+ *
+ *   NEVER  -- never compress; store raw.
+ *   ALWAYS -- always attempt (the size threshold in
+ *             cas_put_object_z still discards a losing result).
+ *   GUESS  -- attempt only if the data looks like text.  Text
+ *             compresses well; binary (including already-compressed
+ *             images, audio, video, archives) usually does not, so
+ *             this skips the wasted attempt without a format list.
+ *
+ * GUESS classifies by the fraction of non-text control bytes in a
+ * short prefix -- no filename, no format table.  Both bounds are
+ * compile-time overridable.
+ */
+enum {
+    CAS_COMPRESS_NEVER,
+    CAS_COMPRESS_ALWAYS,
+    CAS_COMPRESS_GUESS,
+};
+
+#ifndef CAS_TEXT_SNIFF
+#define CAS_TEXT_SNIFF 512  /* prefix bytes examined by GUESS */
+#endif
+#ifndef CAS_TEXT_MAX_NONTEXT_PCT
+#define CAS_TEXT_MAX_NONTEXT_PCT 10  /* above this, treat as binary */
+#endif
+
 /** Decode inlen bytes at in into out, which has capacity outlen.
  *  The caller knows the exact plaintext length in advance, so a
  *  decoder must produce exactly outlen bytes.  Returns CAS_OK on
@@ -67,6 +100,15 @@ struct cas_codec {
     cas_encode_fn encode;
     const char *name;
 };
+
+/** Pick a codec to attempt for a blob under the given policy.
+ *  Returns CAS_CODEC_NONE (store raw) or codec (attempt it).  For
+ *  CAS_COMPRESS_GUESS, returns codec only if the data looks like
+ *  text.  Pair with cas_put_object_z, which applies the size
+ *  threshold to the attempt.
+ */
+int
+cas_codec_policy(int policy, int codec, const void *data, size_t len);
 
 /** Return nonzero if a decoder is available for the codec tag.
  *  CAS_CODEC_NONE is always supported.

@@ -5,6 +5,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "vfs-snap.h"
+#include "cas-codec.h"
+#include "cas-pack.h"
 #include "test.h"
 
 #include <stdlib.h>
@@ -101,6 +103,80 @@ test_snap_single_file(void)
     cas_tree_free(ct);
     cas_free(store);
 }
+
+#ifdef CAS_WITH_MINIZ
+/****************************************************************
+ * Compressed snapshot (vfs_snap_store_z)
+ ****************************************************************/
+
+static void
+test_snap_store_z(void)
+{
+    struct cas *store = make_store("snapz");
+    struct cas_tree *ct = cas_tree_new(store);
+    struct vfs *fs = vfs_new(NULL);
+
+    /* a compressible text file */
+    char text[2000];
+    for (size_t i = 0; i < sizeof(text); i++)
+        text[i] = (char)('a' + (i % 16));
+    ASSERT_INT_EQ(vfs_write(fs, &admin, "/notes.txt", text,
+                  sizeof(text), 1), VFS_OK);
+
+    /* a binary file: half control bytes, so GUESS skips it */
+    unsigned char bin[512];
+    for (size_t i = 0; i < sizeof(bin); i++)
+        bin[i] = (i & 1) ? 0x01 : 0x80;
+    ASSERT_INT_EQ(vfs_write(fs, &admin, "/blob.bin", bin,
+                  sizeof(bin), 1), VFS_OK);
+
+    char hz[CAS_HASH_HEX + 1], h0[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(vfs_snap_store_z(fs, &admin, ct, CAS_COMPRESS_GUESS,
+                  CAS_CODEC_DEFLATE, hz), CAS_OK);
+
+    /* transparency: the compressed snapshot has the same tree hash
+     * as an uncompressed one (blobs live at their plaintext address) */
+    ASSERT_INT_EQ(vfs_snap_store(fs, &admin, ct, h0), CAS_OK);
+    ASSERT_STR_EQ(hz, h0);
+
+    /* the text blob is stored compressed, the binary blob raw */
+    struct cas_file raw;
+    unsigned char tr[CAS_PACK_BLOCK];
+    char bh[CAS_HASH_HEX + 1];
+
+    cas_hash_object("blob", text, sizeof(text), bh);
+    ASSERT_INT_EQ(cas_open_loose_raw(store, &raw, bh, tr), CAS_OK);
+    ASSERT(raw.len < sizeof(text));
+    cas_close(&raw);
+
+    cas_hash_object("blob", bin, sizeof(bin), bh);
+    ASSERT_INT_EQ(cas_open_loose_raw(store, &raw, bh, tr), CAS_OK);
+    ASSERT_INT_EQ((int)raw.len, (int)sizeof(bin));
+    cas_close(&raw);
+
+    /* restore reproduces both files exactly */
+    struct vfs *fs2 = vfs_new(NULL);
+
+    ASSERT_INT_EQ(vfs_snap_restore(fs2, &admin, ct, hz), CAS_OK);
+
+    const void *d;
+    size_t l;
+
+    ASSERT_INT_EQ(vfs_read(fs2, &admin, "/notes.txt", &d, &l), VFS_OK);
+    ASSERT_INT_EQ((int)l, (int)sizeof(text));
+    ASSERT(memcmp(d, text, sizeof(text)) == 0);
+
+    ASSERT_INT_EQ(vfs_read(fs2, &admin, "/blob.bin", &d, &l), VFS_OK);
+    ASSERT_INT_EQ((int)l, (int)sizeof(bin));
+    ASSERT(memcmp(d, bin, sizeof(bin)) == 0);
+
+    vfs_free(fs2);
+    vfs_free(fs);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+#endif
 
 /****************************************************************
  * Nested tree round trip
@@ -801,6 +877,9 @@ main(void)
     RUN(test_snap_empty);
     RUN(test_snap_single_file);
     RUN(test_snap_nested);
+#ifdef CAS_WITH_MINIZ
+    RUN(test_snap_store_z);
+#endif
     RUN(test_snap_deterministic);
     RUN(test_snap_commit_checkout);
     RUN(test_snap_versioning);

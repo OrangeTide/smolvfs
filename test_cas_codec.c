@@ -48,6 +48,40 @@ test_absent_codec(void)
                   CAS_ETYPE);
 }
 
+/* the compression policy classifies text vs binary, data-only */
+static void
+test_policy(void)
+{
+    const char *json = "{ \"key\": \"value\", \"n\": 12345 }";
+    const char *utf8 = "caf\xc3\xa9 na\xc3\xafve \xe2\x9c\x93";  /* high bytes = text */
+
+    /* half control bytes -> binary */
+    unsigned char binary[64];
+    for (int i = 0; i < 64; i++)
+        binary[i] = (i & 1) ? 0x01 : 'A';
+
+    /* NEVER: always raw */
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_NEVER, CAS_CODEC_DEFLATE,
+                                   json, strlen(json)), CAS_CODEC_NONE);
+
+    /* ALWAYS: always the codec, even for binary */
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_ALWAYS, CAS_CODEC_DEFLATE,
+                                   binary, sizeof(binary)),
+                  CAS_CODEC_DEFLATE);
+
+    /* GUESS: text yes, binary no */
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_GUESS, CAS_CODEC_DEFLATE,
+                                   json, strlen(json)), CAS_CODEC_DEFLATE);
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_GUESS, CAS_CODEC_DEFLATE,
+                                   utf8, strlen(utf8)), CAS_CODEC_DEFLATE);
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_GUESS, CAS_CODEC_DEFLATE,
+                                   binary, sizeof(binary)), CAS_CODEC_NONE);
+
+    /* GUESS: empty is not worth compressing */
+    ASSERT_INT_EQ(cas_codec_policy(CAS_COMPRESS_GUESS, CAS_CODEC_DEFLATE,
+                                   "", 0), CAS_CODEC_NONE);
+}
+
 #ifdef CAS_WITH_MINIZ
 static void
 test_deflate_roundtrip(void)
@@ -86,6 +120,7 @@ main(void)
 {
     RUN(test_none_intrinsic);
     RUN(test_absent_codec);
+    RUN(test_policy);
 #ifdef CAS_WITH_MINIZ
     RUN(test_deflate_roundtrip);
 #endif

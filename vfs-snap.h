@@ -19,6 +19,17 @@ int
 vfs_snap_store(struct vfs *fs, const struct vfs_cred *cred,
                struct cas_tree *ct, char *hash_out);
 
+/** Like vfs_snap_store, but compresses file blobs per policy (a
+ *  CAS_COMPRESS_* mode from cas-codec.h) with codec.  File contents
+ *  are stored at their plaintext address regardless, so the tree
+ *  hashes are identical to an uncompressed snapshot.  Reading the
+ *  snapshot back needs the matching decoder compiled in.
+ */
+int
+vfs_snap_store_z(struct vfs *fs, const struct vfs_cred *cred,
+                 struct cas_tree *ct, int policy, int codec,
+                 char *hash_out);
+
 /****************************************************************
  * Restore: CAS -> VFS
  ****************************************************************/
@@ -39,6 +50,13 @@ int
 vfs_snap_commit(struct vfs *fs, const struct vfs_cred *cred,
                 struct cas_tree *ct, const char *ref,
                 const char *comment);
+
+/** Snapshot with compression (see vfs_snap_store_z) and commit to a
+ *  named ref. */
+int
+vfs_snap_commit_z(struct vfs *fs, const struct vfs_cred *cred,
+                  struct cas_tree *ct, const char *ref,
+                  const char *comment, int policy, int codec);
 
 /** Read a ref and restore into VFS. */
 int

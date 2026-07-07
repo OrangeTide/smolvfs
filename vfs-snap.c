@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "vfs-snap.h"
+#include "cas-codec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,7 +86,7 @@ basename_of(const char *path)
 
 static int
 snap_dir(struct vfs *fs, const struct vfs_cred *cred,
-         struct cas_tree *ct, struct cas *store,
+         struct cas_tree *ct, struct cas *store, int policy, int codec,
          const char *dirpath, char *hash_out)
 {
     struct snap_ctx ctx = { NULL, 0, 0 };
@@ -132,7 +133,10 @@ snap_dir(struct vfs *fs, const struct vfs_cred *cred,
                 return CAS_ERR;
             }
 
-            rc = cas_put(store, data ? data : "", len, e.hash);
+            int use = cas_codec_policy(policy, codec, data, len);
+
+            rc = cas_put_object_z(store, "blob", use,
+                                  data ? data : "", len, e.hash);
             if (rc != CAS_OK) {
                 cas_tree_dir_free(&dir);
                 snap_ctx_free(&ctx);
@@ -141,7 +145,8 @@ snap_dir(struct vfs *fs, const struct vfs_cred *cred,
         } else {
             e.mode = CAS_TREE_S_IFDIR | (c->mode & 0777);
 
-            rc = snap_dir(fs, cred, ct, store, c->path, e.hash);
+            rc = snap_dir(fs, cred, ct, store, policy, codec,
+                          c->path, e.hash);
             if (rc != CAS_OK) {
                 cas_tree_dir_free(&dir);
                 snap_ctx_free(&ctx);
@@ -168,7 +173,17 @@ int
 vfs_snap_store(struct vfs *fs, const struct vfs_cred *cred,
                struct cas_tree *ct, char *hash_out)
 {
-    return snap_dir(fs, cred, ct, cas_tree_cas(ct), "/", hash_out);
+    return snap_dir(fs, cred, ct, cas_tree_cas(ct),
+                    CAS_COMPRESS_NEVER, CAS_CODEC_NONE, "/", hash_out);
+}
+
+int
+vfs_snap_store_z(struct vfs *fs, const struct vfs_cred *cred,
+                 struct cas_tree *ct, int policy, int codec,
+                 char *hash_out)
+{
+    return snap_dir(fs, cred, ct, cas_tree_cas(ct),
+                    policy, codec, "/", hash_out);
 }
 
 /****************************************************************
@@ -255,6 +270,20 @@ vfs_snap_commit(struct vfs *fs, const struct vfs_cred *cred,
     char hash[CAS_HASH_HEX + 1];
 
     int rc = vfs_snap_store(fs, cred, ct, hash);
+
+    if (rc != CAS_OK)
+        return rc;
+    return cas_tree_ref_commit(ct, ref, hash, comment);
+}
+
+int
+vfs_snap_commit_z(struct vfs *fs, const struct vfs_cred *cred,
+                  struct cas_tree *ct, const char *ref,
+                  const char *comment, int policy, int codec)
+{
+    char hash[CAS_HASH_HEX + 1];
+
+    int rc = vfs_snap_store_z(fs, cred, ct, policy, codec, hash);
 
     if (rc != CAS_OK)
         return rc;
