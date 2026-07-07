@@ -315,13 +315,23 @@ walk_reachable(root, idx, exts):
     return want
 ```
 
-## Optional example programs
+## Reference client
 
-If a reference downloader is wanted, it should be a small C program using
-libcurl (range requests, HTTP/2 multiplexing) linked against the smolvfs
-library for verification and storage (`cas_exists`, `cas_put_object_at`,
-`cas_put_precompressed`, `cas_tree_load`). It would live as a worked
-example, not part of the library. It is out of scope for this document.
+[examples/cas-fetch.c](examples/cas-fetch.c) implements the loose-object
+transport described above: it fetches the ref, walks the tree, GETs each
+missing object with libcurl, and verifies it with `cas_fsck_object`
+before storing it, so a re-run against a newer ref fetches only the
+changed objects. It links against the smolvfs library and libcurl.
+
+```sh
+make cas-fetch                # add MINIZ=1 for compressed depots
+./cas-fetch https://cdn.example/depot main ./cache
+```
+
+It fetches whole objects rather than pack byte-ranges, which keeps the
+example small while still demonstrating the incremental core. The
+packfile transport (range requests, extent coalescing, byte-accurate
+progress) is a documented extension left to a fuller client.
 
 ## Open questions
 
