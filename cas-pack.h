@@ -151,17 +151,19 @@ int
 cas_pack_create(struct cas *store, const char *path);
 
 /** Create a packfile, compressing objects with codec (a tag from
- *  cas-codec.h) where that saves space.  Each raw object is
- *  compressed into the packfile only if it beats its stored size
- *  by a comfortable margin and an encoder for codec is compiled
- *  in; already-compressed objects are copied unchanged.  Object
- *  addresses are unaffected.  Pass CAS_CODEC_NONE for no
+ *  cas-codec.h) under policy (a CAS_COMPRESS_* mode) where that
+ *  saves space.  A raw object is compressed into the packfile only
+ *  if the policy selects it, it beats its stored size by a
+ *  comfortable margin, and an encoder for codec is compiled in;
+ *  already-compressed objects are copied unchanged.  Object
+ *  addresses are unaffected.  Pass CAS_COMPRESS_NEVER for no
  *  compression (identical to cas_pack_create).
  *
  *  Returns CAS_OK on success.
  */
 int
-cas_pack_create_z(struct cas *store, const char *path, int codec);
+cas_pack_create_z(struct cas *store, const char *path, int policy,
+                  int codec);
 
 /** Look up an object in a packfile by hex hash.
  *  On success, cf->data and cf->len are set.  For an uncompressed

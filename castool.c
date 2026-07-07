@@ -892,7 +892,8 @@ cmd_pack(struct cas_tree *ct, int argc, char **argv)
 		        progname);
 
 	if (compress)
-		rc = cas_pack_create_z(store, path, CAS_CODEC_DEFLATE);
+		rc = cas_pack_create_z(store, path, CAS_COMPRESS_GUESS,
+		                       CAS_CODEC_DEFLATE);
 	else
 		rc = cas_pack_create(store, path);
 

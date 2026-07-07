@@ -219,7 +219,7 @@ test_pack_compressed(void)
 	cas_free(store);
 }
 
-/* cas_pack_create_z compresses raw objects into the packfile */
+/* cas_pack_create_z under GUESS: compress text, leave binary raw */
 static void
 test_pack_create_z(void)
 {
@@ -232,39 +232,63 @@ test_pack_create_z(void)
 	struct cas *store = cas_new(depot);
 	ASSERT(store != NULL);
 
-	/* a raw, highly compressible blob */
-	unsigned char data[4096];
-	memset(data, 'Q', sizeof(data));
+	/* a compressible text blob (all printable) */
+	unsigned char text[4096];
+	memset(text, 'Q', sizeof(text));
+	char thash[CAS_HASH_HEX + 1];
+	ASSERT_INT_EQ(cas_put(store, text, sizeof(text), thash), CAS_OK);
 
-	char hash[CAS_HASH_HEX + 1];
-	ASSERT_INT_EQ(cas_put(store, data, sizeof(data), hash), CAS_OK);
+	/* an incompressible binary blob (half control bytes) */
+	unsigned char bin[4096];
+	for (size_t i = 0; i < sizeof(bin); i++)
+		bin[i] = (i & 1) ? 0x01 : 0xa5;
+	char bhash[CAS_HASH_HEX + 1];
+	ASSERT_INT_EQ(cas_put(store, bin, sizeof(bin), bhash), CAS_OK);
 
-	ASSERT_INT_EQ(cas_pack_create_z(store, packpath, CAS_CODEC_DEFLATE),
-	              CAS_OK);
-
-	/* the packfile is far smaller than the plaintext */
-	struct stat sb;
-	ASSERT_INT_EQ(stat(packpath, &sb), 0);
-	ASSERT((size_t)sb.st_size < sizeof(data));
+	ASSERT_INT_EQ(cas_pack_create_z(store, packpath, CAS_COMPRESS_GUESS,
+	              CAS_CODEC_DEFLATE), CAS_OK);
 
 	struct cas_pack *pack = cas_pack_open(packpath);
 	ASSERT(pack != NULL);
+	ASSERT_INT_EQ((int)cas_pack_count(pack), 2);
 
-	/* lookup decodes back to the original bytes */
+	/* both objects decode back to their originals */
 	struct cas_file cf;
 	char type[CAS_TYPE_MAX + 1];
-	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, hash, type,
+
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, thash, type,
 	              sizeof(type)), CAS_OK);
-	ASSERT_INT_EQ((int)cf.len, (int)sizeof(data));
-	ASSERT(memcmp(cf.data, data, sizeof(data)) == 0);
+	ASSERT_INT_EQ((int)cf.len, (int)sizeof(text));
+	ASSERT(memcmp(cf.data, text, sizeof(text)) == 0);
 	cas_close(&cf);
 
-	/* and fsck verifies it */
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, bhash, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, (int)sizeof(bin));
+	ASSERT(memcmp(cf.data, bin, sizeof(bin)) == 0);
+	cas_close(&cf);
+
 	struct fsck_result fr = {0};
 	ASSERT_INT_EQ(cas_pack_fsck(pack, fsck_counter, &fr), CAS_OK);
-	ASSERT_INT_EQ(fr.ok, 1);
+	ASSERT_INT_EQ(fr.ok, 2);
 	cas_pack_close(pack);
 
+	/* the binary blob is stored raw (GUESS skipped it), so its bytes
+	 * appear verbatim in the packfile; the highly compressible text
+	 * blob was shrunk, so 4096 'Q' bytes do not appear contiguously */
+	int fd = open(packpath, O_RDONLY);
+	ASSERT(fd >= 0);
+	off_t sz = lseek(fd, 0, SEEK_END);
+	lseek(fd, 0, SEEK_SET);
+	unsigned char *buf = malloc((size_t)sz);
+	ASSERT(buf != NULL);
+	ASSERT_INT_EQ((int)read(fd, buf, (size_t)sz), (int)sz);
+	close(fd);
+
+	ASSERT(contains(buf, (size_t)sz, bin, sizeof(bin)));
+	ASSERT(!contains(buf, (size_t)sz, text, sizeof(text)));
+
+	free(buf);
 	cas_free(store);
 }
 #endif
