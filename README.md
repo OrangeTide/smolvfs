@@ -1113,9 +1113,13 @@ cas_fsck(struct cas *store, cas_fsck_fn fn, void *ctx);
 Check integrity of all objects by decoding (if compressed) and rehashing
 each file, comparing to its filename.  Calls `fn` for each object with a
 status code (`CAS_FSCK_OK`, `CAS_FSCK_CORRUPT`, `CAS_FSCK_BADNAME`,
-`CAS_FSCK_IOERR`, `CAS_FSCK_NOCODEC`).  `CAS_FSCK_NOCODEC` means the
-object is compressed with a codec that is not compiled in, so it could
-not be verified; it is reported but not counted as a failure.
+`CAS_FSCK_IOERR`, `CAS_FSCK_NOCODEC`, `CAS_FSCK_REENCODED`).
+`CAS_FSCK_NOCODEC` means the object is compressed with a codec that is
+not compiled in, so it could not be verified.  `CAS_FSCK_REENCODED`
+means the object is an `htree`, whose address commits to its canonical
+text form rather than to its stored bytes; this layer does not decode
+it, so `cas_tree_fsck` verifies it instead.  Both are reported but not
+counted as a failure.
 
 **Returns:** `CAS_OK` if all objects passed (skips do not fail the run),
 `CAS_ERR` if any object was corrupt or unreadable.
@@ -1129,7 +1133,8 @@ Check integrity of a single object.
 
 **Returns:** `CAS_FSCK_OK` if valid, `CAS_FSCK_CORRUPT` if the rehash
 does not match, `CAS_FSCK_BADNAME` if the hash string is invalid,
-`CAS_FSCK_IOERR` if the object cannot be read.
+`CAS_FSCK_IOERR` if the object cannot be read, `CAS_FSCK_REENCODED` if
+the object is an `htree` (verify it with `cas_tree_fsck`).
 
 ```c
 int
