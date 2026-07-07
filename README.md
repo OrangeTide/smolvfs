@@ -340,6 +340,35 @@ number does not exactly match `version.h`, so a mistagged or unbumped
 release is rejected rather than published. The tag must match exactly;
 pre-release suffixes like `v0.1.0-rc1` are not accepted as-is.
 
+### Vendoring
+
+Vendor smolvfs as a tagged source archive with the bundled
+`scripts/get-smolvfs.sh`. Copy that script into your project and run it
+to pull a tagged release into a vendor directory (default
+`third_party/smolvfs`), recording provenance in an `UPSTREAM` file
+beside it. There is no git clone and no build step: it fetches the
+source archive GitHub publishes for the tag, so you only ever vendor a
+version that was tagged and passed the release CI.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OrangeTide/smolvfs/main/scripts/get-smolvfs.sh \
+    | sh -s -- 0.1.0 third_party/smolvfs
+```
+
+Re-run with a newer version to update in place. Pass `--force` to
+overwrite a destination that is not a prior smolvfs checkout; set
+`SMOLVFS_ARCHIVE` to a local file or `file://` URL for offline use and
+`SMOLVFS_SHA256` to pin the archive. Run `scripts/get-smolvfs.sh
+--help` for all options. (The command above works once the version it
+names has been tagged and pushed.)
+
+To build the vendored copy, compile `cas.c cas-codec.c cas-tree.c
+cas-pack.c cas-omap.c vfs.c vfs-snap.c` with their headers and
+`version.h`. For the bundled DEFLATE codec, add `cas-codec-miniz.c` and
+`third_party/miniz.c` and define `-DCAS_WITH_MINIZ -DMINIZ_NO_STDIO`.
+The rest of the archive (tests, `castool`, examples, CI) is not needed
+to use the library.
+
 ### Compiler flags
 
 The default Makefile uses:
