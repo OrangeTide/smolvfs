@@ -473,6 +473,86 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 }
 
 /****************************************************************
+ * Import
+ ****************************************************************/
+
+struct import_ctx {
+	struct cas_pack *pack;
+	struct cas *store;
+	int policy;
+	int codec;
+	uint64_t total;
+	uint64_t stored;
+	int rc;
+};
+
+static int
+import_one(const char *hash, void *ctx)
+{
+	struct import_ctx *ic = ctx;
+	struct cas_file cf;
+	char type[CAS_TYPE_MAX + 1];
+
+	int rc = cas_pack_lookup(ic->pack, &cf, hash, type, sizeof(type));
+
+	if (rc != CAS_OK) {
+		ic->rc = rc;
+		return 1;
+	}
+
+	/* Re-derive the address from the decoded content: a bundle whose
+	 * index hash disagrees with its data is rejected before anything
+	 * is written into the depot. */
+	char computed[CAS_HASH_HEX + 1];
+
+	cas_hash_object(type, cf.data, cf.len, computed);
+	if (strcmp(computed, hash) != 0) {
+		cas_close(&cf);
+		ic->rc = CAS_ERR;
+		return 1;
+	}
+
+	int existed = cas_exists(ic->store, hash);
+	int use = cas_codec_policy(ic->policy, ic->codec, cf.data, cf.len);
+	char out[CAS_HASH_HEX + 1];
+
+	rc = cas_put_object_z(ic->store, type, use, cf.data, cf.len, out);
+	cas_close(&cf);
+	if (rc != CAS_OK) {
+		ic->rc = rc;
+		return 1;
+	}
+
+	ic->total++;
+	if (!existed)
+		ic->stored++;
+	return 0;
+}
+
+int
+cas_pack_import(struct cas_pack *pack, struct cas *store,
+                int policy, int codec, uint64_t *total_out,
+                uint64_t *stored_out)
+{
+	struct import_ctx ic = {
+		.pack = pack,
+		.store = store,
+		.policy = policy,
+		.codec = codec,
+	};
+
+	cas_pack_foreach(pack, import_one, &ic);
+
+	if (ic.rc != CAS_OK)
+		return ic.rc;
+	if (total_out)
+		*total_out = ic.total;
+	if (stored_out)
+		*stored_out = ic.stored;
+	return CAS_OK;
+}
+
+/****************************************************************
  * Create
  ****************************************************************/
 

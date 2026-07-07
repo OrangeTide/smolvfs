@@ -735,6 +735,175 @@ test_pack_empty_blob(void)
 }
 
 /****************************************************************
+ * test_pack_import: merge a bundle into a separate depot
+ ****************************************************************/
+
+static void
+test_pack_import(void)
+{
+	char src[512], tgt[512], packpath[512];
+
+	snprintf(src, sizeof(src), "%s/imp_src", tmpdir);
+	snprintf(tgt, sizeof(tgt), "%s/imp_tgt", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/bundle.pack", tmpdir);
+
+	struct cas *s = cas_new(src);
+	ASSERT(s != NULL);
+
+	char h[4][CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(s, "alpha", 5, h[0]), CAS_OK);
+	ASSERT_INT_EQ(cas_put(s, "beta", 4, h[1]), CAS_OK);
+	ASSERT_INT_EQ(cas_put(s, "gamma", 5, h[2]), CAS_OK);
+	ASSERT_INT_EQ(cas_put_object(s, "tree", "tdata", 5, h[3]),
+	              CAS_OK);
+	ASSERT_INT_EQ(cas_pack_create(s, packpath), CAS_OK);
+	cas_free(s);
+
+	/* import the bundle into a fresh, unrelated depot */
+	struct cas *t = cas_new(tgt);
+	ASSERT(t != NULL);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+
+	uint64_t total = 0, stored = 0;
+
+	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
+	              CAS_CODEC_NONE, &total, &stored), CAS_OK);
+	ASSERT_INT_EQ((int)total, 4);
+	ASSERT_INT_EQ((int)stored, 4);
+
+	for (int i = 0; i < 4; i++)
+		ASSERT(cas_exists(t, h[i]));
+
+	struct cas_file cf;
+
+	ASSERT_INT_EQ(cas_open(t, &cf, h[0]), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, 5);
+	ASSERT(memcmp(cf.data, "alpha", 5) == 0);
+	cas_close(&cf);
+
+	/* re-import is a no-op: every object already present */
+	total = stored = 0;
+	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
+	              CAS_CODEC_NONE, &total, &stored), CAS_OK);
+	ASSERT_INT_EQ((int)total, 4);
+	ASSERT_INT_EQ((int)stored, 0);
+
+	cas_pack_close(pack);
+	cas_free(t);
+}
+
+/****************************************************************
+ * test_pack_import_corrupt: a tampered bundle is rejected
+ ****************************************************************/
+
+static void
+test_pack_import_corrupt(void)
+{
+	char src[512], tgt[512], packpath[512];
+
+	snprintf(src, sizeof(src), "%s/impc_src", tmpdir);
+	snprintf(tgt, sizeof(tgt), "%s/impc_tgt", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/corrupt.pack", tmpdir);
+
+	struct cas *s = cas_new(src);
+	ASSERT(s != NULL);
+
+	char h[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(s, "trustme", 7, h), CAS_OK);
+	ASSERT_INT_EQ(cas_pack_create(s, packpath), CAS_OK);
+	cas_free(s);
+
+	/* flip a byte in the object's data region (the first object's
+	 * data starts at offset 0); the index checksum is untouched, so
+	 * the pack still opens, but the content no longer matches its
+	 * claimed address. */
+	int fd = open(packpath, O_RDWR);
+	ASSERT(fd >= 0);
+
+	unsigned char b;
+
+	ASSERT_INT_EQ((int)pread(fd, &b, 1, 0), 1);
+	b ^= 0xff;
+	ASSERT_INT_EQ((int)pwrite(fd, &b, 1, 0), 1);
+	close(fd);
+
+	struct cas *t = cas_new(tgt);
+	ASSERT(t != NULL);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+
+	uint64_t total = 0, stored = 0;
+
+	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
+	              CAS_CODEC_NONE, &total, &stored), CAS_ERR);
+
+	/* the tampered object was verified before storing, so it never
+	 * entered the depot */
+	ASSERT(!cas_exists(t, h));
+
+	cas_pack_close(pack);
+	cas_free(t);
+}
+
+#ifdef CAS_WITH_MINIZ
+/****************************************************************
+ * test_pack_import_compressed: a compressed bundle decodes into
+ * the target depot and imports under GUESS
+ ****************************************************************/
+
+static void
+test_pack_import_compressed(void)
+{
+	char src[512], tgt[512], packpath[512];
+
+	snprintf(src, sizeof(src), "%s/impz_src", tmpdir);
+	snprintf(tgt, sizeof(tgt), "%s/impz_tgt", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/z.pack", tmpdir);
+
+	struct cas *s = cas_new(src);
+	ASSERT(s != NULL);
+
+	unsigned char text[4096];
+	memset(text, 'Q', sizeof(text));
+	char thash[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(s, text, sizeof(text), thash), CAS_OK);
+	ASSERT_INT_EQ(cas_pack_create_z(s, packpath, CAS_COMPRESS_GUESS,
+	              CAS_CODEC_DEFLATE), CAS_OK);
+	cas_free(s);
+
+	struct cas *t = cas_new(tgt);
+	ASSERT(t != NULL);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+
+	uint64_t total = 0, stored = 0;
+
+	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_GUESS,
+	              CAS_CODEC_DEFLATE, &total, &stored), CAS_OK);
+	ASSERT_INT_EQ((int)total, 1);
+	ASSERT_INT_EQ((int)stored, 1);
+
+	/* the object decodes back to the original plaintext */
+	struct cas_file cf;
+
+	ASSERT_INT_EQ(cas_open(t, &cf, thash), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, (int)sizeof(text));
+	ASSERT(memcmp(cf.data, text, sizeof(text)) == 0);
+	cas_close(&cf);
+
+	cas_pack_close(pack);
+	cas_free(t);
+}
+#endif
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -765,6 +934,11 @@ main(void)
 	RUN(test_pack_integrated);
 	RUN(test_pack_empty);
 	RUN(test_pack_empty_blob);
+	RUN(test_pack_import);
+	RUN(test_pack_import_corrupt);
+#ifdef CAS_WITH_MINIZ
+	RUN(test_pack_import_compressed);
+#endif
 
 	TEST_REPORT();
 }

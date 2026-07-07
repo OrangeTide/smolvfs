@@ -207,4 +207,25 @@ cas_pack_foreach(struct cas_pack *pack, cas_pack_foreach_fn fn,
 int
 cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx);
 
+/** Merge every object from a packfile into store, deduplicated by
+ *  address.  Each object's address is re-verified against its decoded
+ *  content, so a bundle downloaded from an untrusted server cannot
+ *  poison the depot: a mismatch aborts with CAS_ERR before that object
+ *  is stored (objects merged earlier in the same call remain, so an
+ *  import is not atomic).  Objects already present are skipped.
+ *
+ *  Objects are stored compressed per policy and codec (a CAS_COMPRESS_*
+ *  mode and codec tag from cas-codec.h), exactly as cas_put_object_z
+ *  would; pass CAS_COMPRESS_NEVER to store everything raw.  The address
+ *  is the plaintext hash regardless, so it matches the bundle.
+ *
+ *  If non-NULL, *total_out receives the number of objects processed and
+ *  *stored_out the number newly written (those not already present).
+ *  Returns CAS_OK on success.
+ */
+int
+cas_pack_import(struct cas_pack *pack, struct cas *store,
+                int policy, int codec, uint64_t *total_out,
+                uint64_t *stored_out);
+
 #endif /* CAS_PACK_H */
