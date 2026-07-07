@@ -500,23 +500,40 @@ import_one(const char *hash, void *ctx)
 		return 1;
 	}
 
-	/* Re-derive the address from the decoded content: a bundle whose
-	 * index hash disagrees with its data is rejected before anything
-	 * is written into the depot. */
-	char computed[CAS_HASH_HEX + 1];
+	/* An "htree" object is a lookup-optimized re-encoding of a "tree"
+	 * whose address is the hash of the canonical text form, not of the
+	 * htree bytes; that text form cannot be rebuilt here, so the bytes
+	 * are stored verbatim at the pack's address and trusted (the pack
+	 * index is checksummed, and the htree carries its own adler32).
+	 * Every other type is self-addressed: its content must hash to the
+	 * claimed address, so a tampered object is rejected before it is
+	 * written into the depot. */
+	int reencoded = strcmp(type, "htree") == 0;
 
-	cas_hash_object(type, cf.data, cf.len, computed);
-	if (strcmp(computed, hash) != 0) {
-		cas_close(&cf);
-		ic->rc = CAS_ERR;
-		return 1;
+	if (!reencoded) {
+		char computed[CAS_HASH_HEX + 1];
+
+		cas_hash_object(type, cf.data, cf.len, computed);
+		if (strcmp(computed, hash) != 0) {
+			cas_close(&cf);
+			ic->rc = CAS_ERR;
+			return 1;
+		}
 	}
 
 	int existed = cas_exists(ic->store, hash);
-	int use = cas_codec_policy(ic->policy, ic->codec, cf.data, cf.len);
-	char out[CAS_HASH_HEX + 1];
 
-	rc = cas_put_object_z(ic->store, type, use, cf.data, cf.len, out);
+	if (reencoded) {
+		rc = cas_put_object_at(ic->store, type, cf.data, cf.len,
+		                       hash);
+	} else {
+		int use = cas_codec_policy(ic->policy, ic->codec,
+		                           cf.data, cf.len);
+		char out[CAS_HASH_HEX + 1];
+
+		rc = cas_put_object_z(ic->store, type, use, cf.data,
+		                      cf.len, out);
+	}
 	cas_close(&cf);
 	if (rc != CAS_OK) {
 		ic->rc = rc;

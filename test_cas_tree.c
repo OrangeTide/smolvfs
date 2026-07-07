@@ -5,6 +5,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas-tree.h"
+#include "cas-pack.h"
+#include "cas-codec.h"
 #include "test.h"
 
 #include <stdlib.h>
@@ -1294,6 +1296,85 @@ test_htree_many_entries(void)
 }
 
 /****************************************************************
+ * Htree: survives a bundle import
+ *
+ * An htree object is stored at the address of its canonical text
+ * form, not of its own bytes.  cas_pack_import must preserve that
+ * address (store the htree verbatim) rather than recompute it, or the
+ * imported directory would be unreadable.
+ ****************************************************************/
+
+static void
+test_htree_pack_import(void)
+{
+    char packpath[512];
+
+    snprintf(packpath, sizeof(packpath), "%s/htree.pack", tmpdir);
+
+    struct cas *src = make_store("htimp_src");
+    struct cas_tree *ct = cas_tree_new(src);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(src, "payload", 7, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = {
+        .mode = 0100644,
+        .uid = 1000,
+        .gid = 1000,
+        .mtime_s = 1700000000LL,
+    };
+
+    memcpy(e.hash, blob_hash, CAS_HASH_HEX + 1);
+    strcpy(e.name, "file.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char root[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, root), CAS_OK);
+    cas_tree_dir_free(&dir);
+    ASSERT_INT_EQ(cas_pack_create(src, packpath), CAS_OK);
+    cas_tree_free(ct);
+    cas_free(src);
+
+    /* import the bundle into a fresh depot */
+    struct cas *tgt = make_store("htimp_tgt");
+    struct cas_pack *pack = cas_pack_open(packpath);
+
+    ASSERT(pack != NULL);
+
+    uint64_t total = 0, stored = 0;
+
+    ASSERT_INT_EQ(cas_pack_import(pack, tgt, CAS_COMPRESS_NEVER,
+                  CAS_CODEC_NONE, &total, &stored), CAS_OK);
+    ASSERT_INT_EQ((int)total, 2);
+    ASSERT_INT_EQ((int)stored, 2);
+    cas_pack_close(pack);
+
+    /* the htree root kept its address and reads back as a directory */
+    ASSERT(cas_exists(tgt, root));
+    ASSERT(cas_exists(tgt, blob_hash));
+
+    struct cas_tree *ct2 = cas_tree_new(tgt);
+    struct cas_tree_dir loaded;
+
+    ASSERT_INT_EQ(cas_tree_load(ct2, root, &loaded), CAS_OK);
+    ASSERT_INT_EQ(loaded.count, 1);
+    ASSERT_STR_EQ(loaded.entries[0].name, "file.txt");
+    ASSERT_STR_EQ(loaded.entries[0].hash, blob_hash);
+
+    cas_tree_dir_free(&loaded);
+    cas_tree_free(ct2);
+    cas_free(tgt);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -1333,6 +1414,7 @@ main(void)
     RUN(test_htree_fsck);
     RUN(test_text_tree_lookup);
     RUN(test_htree_many_entries);
+    RUN(test_htree_pack_import);
 
     TEST_REPORT();
 }

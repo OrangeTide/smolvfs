@@ -214,6 +214,12 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx);
  *  is stored (objects merged earlier in the same call remain, so an
  *  import is not atomic).  Objects already present are skipped.
  *
+ *  An "htree" object is addressed by the hash of its canonical text
+ *  form rather than of its own bytes, so it is stored verbatim at the
+ *  bundle's address and trusted (the pack index is checksummed and the
+ *  htree carries an internal adler32); only self-addressed objects
+ *  (blobs, text trees, compressed blobs) get the content re-hash check.
+ *
  *  Objects are stored compressed per policy and codec (a CAS_COMPRESS_*
  *  mode and codec tag from cas-codec.h), exactly as cas_put_object_z
  *  would; pass CAS_COMPRESS_NEVER to store everything raw.  The address
