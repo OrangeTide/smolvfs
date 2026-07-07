@@ -210,16 +210,29 @@ enum {
     CAS_FSCK_CORRUPT,
     CAS_FSCK_BADNAME,
     CAS_FSCK_IOERR,
-    CAS_FSCK_NOCODEC,  /* compressed, but no decoder to verify with */
+    CAS_FSCK_NOCODEC,    /* compressed, but no decoder to verify with */
+    CAS_FSCK_REENCODED,  /* re-encoded object (htree); verify at the
+                            tree layer with cas_tree_fsck */
 };
 
 /** Callback for cas_fsck.  Called for each object checked.  status
- *  is one of CAS_FSCK_OK/CORRUPT/BADNAME/IOERR/NOCODEC.  NOCODEC
- *  means the object is compressed with a codec not compiled in, so
- *  it could not be verified; it is reported but not counted as a
+ *  is one of CAS_FSCK_OK/CORRUPT/BADNAME/IOERR/NOCODEC/REENCODED.
+ *  NOCODEC means the object is compressed with a codec not compiled
+ *  in, so it could not be verified.  REENCODED means the object is an
+ *  htree, whose address commits to its canonical text form rather than
+ *  to its stored bytes; this layer does not decode it, so verifying it
+ *  is left to cas_tree_fsck.  Both are reported but not counted as a
  *  failure.  Return 0 to continue, nonzero to stop.
  */
 typedef int (*cas_fsck_fn)(const char *hash, int status, void *ctx);
+
+/** Whether an object type is stored under an address that commits to a
+ *  canonical form other than its stored bytes (currently only "htree",
+ *  addressed by the hash of its equivalent "tree" text).  Such objects
+ *  cannot be verified by re-hashing their bytes at the CAS layer.
+ */
+int
+cas_type_is_reencoded(const char *type);
 
 /** Check integrity of all objects: rehash and compare.
  *  Returns CAS_OK if all objects passed, CAS_ERR if any failed.

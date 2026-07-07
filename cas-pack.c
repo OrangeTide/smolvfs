@@ -416,6 +416,13 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 			goto report;
 		}
 
+		/* an htree is addressed by its text form, not its bytes, so
+		 * it is not verifiable here; cas_tree_fsck does it */
+		if (cas_type_is_reencoded(type)) {
+			status = CAS_FSCK_REENCODED;
+			goto report;
+		}
+
 		uint64_t stored =
 			load_le64((const unsigned char *)&e->stored_size);
 		uint64_t region_size = stored ? stored : content_len;
@@ -462,8 +469,9 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 		status = CAS_FSCK_OK;
 
 	report:
-		/* NOCODEC is a skip, not a corruption */
-		if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC)
+		/* NOCODEC and REENCODED are skips, not corruption */
+		if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC &&
+		    status != CAS_FSCK_REENCODED)
 			errors++;
 		if (fn && fn(hex, status, ctx) != 0)
 			break;
@@ -508,7 +516,7 @@ import_one(const char *hash, void *ctx)
 	 * Every other type is self-addressed: its content must hash to the
 	 * claimed address, so a tampered object is rejected before it is
 	 * written into the depot. */
-	int reencoded = strcmp(type, "htree") == 0;
+	int reencoded = cas_type_is_reencoded(type);
 
 	if (!reencoded) {
 		char computed[CAS_HASH_HEX + 1];
