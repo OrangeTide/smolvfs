@@ -50,6 +50,12 @@
  * The footer checksum covers index || footer_without_checksum.
  * Object data integrity is verified per-object via BLAKE2b
  * against the hash stored in the index.
+ *
+ * Byte order: every multi-byte integer in the index and footer
+ * (offset, stored_size, entry_count) is stored little-endian, so a
+ * packfile is byte-identical and interchangeable across
+ * architectures.  The hash, magic, and "type len\0" header bytes
+ * are already endian-neutral.
  */
 
 /****************************************************************
@@ -91,6 +97,7 @@ struct cas_pack_trailer {
 /** Packfile index entry -- one per object, sorted by hash.
  *
  *  hash[32] + offset[8] + stored_size[8] + reserved[16]
+ *  offset and stored_size are little-endian.
  *  offset points to the start of the object's trailer.
  *  stored_size is the on-disk data-region length, which differs
  *  from the header (plaintext) length for compressed v2 objects.
@@ -107,6 +114,7 @@ struct cas_pack_index_entry {
 /** Packfile footer -- last 64 bytes of the file.
  *
  *  magic[8] + entry_count[8] + checksum[32] + reserved[16]
+ *  entry_count is little-endian.
  *  checksum covers: all index entries || footer without checksum
  *  (the first 16 bytes of the footer: magic + entry_count).
  */
