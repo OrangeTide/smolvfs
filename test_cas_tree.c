@@ -1375,6 +1375,98 @@ test_htree_pack_import(void)
 }
 
 /****************************************************************
+ * Htree: object-layer fsck reports it as a skip, not corrupt
+ *
+ * An htree is addressed by its canonical text form, so cas_fsck and
+ * cas_pack_fsck cannot verify it by re-hashing its bytes.  They must
+ * report CAS_FSCK_REENCODED (a skip) instead of CAS_FSCK_CORRUPT, and
+ * still count self-addressed objects normally.
+ ****************************************************************/
+
+struct fsck_tally {
+    int ok;
+    int reencoded;
+    int other;
+};
+
+static int
+fsck_tallier(const char *hash, int status, void *ctx)
+{
+    struct fsck_tally *t = ctx;
+
+    (void)hash;
+    if (status == CAS_FSCK_OK)
+        t->ok++;
+    else if (status == CAS_FSCK_REENCODED)
+        t->reencoded++;
+    else
+        t->other++;
+    return 0;
+}
+
+static void
+test_htree_fsck_skips(void)
+{
+    char packpath[512];
+
+    snprintf(packpath, sizeof(packpath), "%s/htfsck.pack", tmpdir);
+
+    struct cas *store = make_store("htfsck");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char blob_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "payload", 7, blob_hash), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = { .mode = 0100644 };
+
+    memcpy(e.hash, blob_hash, CAS_HASH_HEX + 1);
+    strcpy(e.name, "file.txt");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char root[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, root), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    /* object-layer fsck: htree is a skip, blob verifies normally */
+    ASSERT_INT_EQ(cas_fsck_object(store, root), CAS_FSCK_REENCODED);
+    ASSERT_INT_EQ(cas_fsck_object(store, blob_hash), CAS_FSCK_OK);
+
+    /* whole-store fsck: htree counted as a skip, not an error */
+    struct fsck_tally wt = {0};
+
+    ASSERT_INT_EQ(cas_fsck(store, fsck_tallier, &wt), CAS_OK);
+    ASSERT_INT_EQ(wt.ok, 1);
+    ASSERT_INT_EQ(wt.reencoded, 1);
+    ASSERT_INT_EQ(wt.other, 0);
+
+    /* pack fsck: htree reported reencoded, blob ok, no errors */
+    ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+
+    struct cas_pack *pack = cas_pack_open(packpath);
+
+    ASSERT(pack != NULL);
+
+    struct fsck_tally t = {0};
+
+    ASSERT_INT_EQ(cas_pack_fsck(pack, fsck_tallier, &t), CAS_OK);
+    ASSERT_INT_EQ(t.ok, 1);
+    ASSERT_INT_EQ(t.reencoded, 1);
+    ASSERT_INT_EQ(t.other, 0);
+
+    cas_pack_close(pack);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -1415,6 +1507,7 @@ main(void)
     RUN(test_text_tree_lookup);
     RUN(test_htree_many_entries);
     RUN(test_htree_pack_import);
+    RUN(test_htree_fsck_skips);
 
     TEST_REPORT();
 }

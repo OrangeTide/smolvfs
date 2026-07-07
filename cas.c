@@ -1022,6 +1022,12 @@ cas_foreach(struct cas *store, cas_foreach_fn fn, void *ctx)
  ****************************************************************/
 
 int
+cas_type_is_reencoded(const char *type)
+{
+    return strcmp(type, "htree") == 0;
+}
+
+int
 cas_fsck_object(struct cas *store, const char *hash)
 {
     if (!valid_hash(hash))
@@ -1046,6 +1052,13 @@ cas_fsck_object(struct cas *store, const char *hash)
                      type, sizeof(type), &content_len) != CAS_OK) {
         cas_close(&cf);
         return CAS_FSCK_CORRUPT;
+    }
+
+    /* An htree is addressed by its canonical text form, not its own
+     * bytes, so it cannot be verified here; cas_tree_fsck does it. */
+    if (cas_type_is_reencoded(type)) {
+        cas_close(&cf);
+        return CAS_FSCK_REENCODED;
     }
 
     /* decode to plaintext, then rehash "type len\0" || plaintext */
@@ -1094,8 +1107,10 @@ fsck_visitor(const char *hash, void *ctx)
     struct cas_fsck_ctx *fc = ctx;
     int status = cas_fsck_object(fc->store, hash);
 
-    /* NOCODEC is a skip, not a corruption: reported, not counted */
-    if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC)
+    /* NOCODEC and REENCODED are skips, not corruption: reported,
+     * not counted */
+    if (status != CAS_FSCK_OK && status != CAS_FSCK_NOCODEC &&
+        status != CAS_FSCK_REENCODED)
         fc->errors++;
     if (fc->fn)
         return fc->fn(hash, status, fc->ctx);
