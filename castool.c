@@ -6,6 +6,7 @@
 
 #include "cas-tree.h"
 #include "cas-pack.h"
+#include "cas-codec.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -782,6 +783,9 @@ fsck_reporter(const char *path, const char *hash, int status,
 	case CAS_TREE_FSCK_BAD_TREE:
 		msg = "bad tree";
 		break;
+	case CAS_TREE_FSCK_NOCODEC:
+		msg = "skipped (no codec)";
+		break;
 	default:
 		msg = "unknown";
 		break;
@@ -843,8 +847,16 @@ cmd_gc(struct cas_tree *ct, int argc, char **argv)
 static int
 cmd_pack(struct cas_tree *ct, int argc, char **argv)
 {
-	(void)argc;
-	(void)argv;
+	int compress = 0;
+
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "-z") == 0) {
+			compress = 1;
+		} else {
+			fprintf(stderr, "usage: %s pack [-z]\n", progname);
+			return 1;
+		}
+	}
 
 	struct cas *store = cas_tree_cas(ct);
 	const char *base = cas_basedir(store);
@@ -852,7 +864,20 @@ cmd_pack(struct cas_tree *ct, int argc, char **argv)
 
 	snprintf(path, sizeof(path), "%s/pack.dat", base);
 
-	int rc = cas_pack_create(store, path);
+	int did_compress = compress &&
+	                   cas_codec_can_encode(CAS_CODEC_DEFLATE);
+	int rc;
+
+	if (compress && !did_compress)
+		fprintf(stderr,
+		        "%s: warning: no compression codec compiled in "
+		        "(build with MINIZ=1); packing uncompressed\n",
+		        progname);
+
+	if (compress)
+		rc = cas_pack_create_z(store, path, CAS_CODEC_DEFLATE);
+	else
+		rc = cas_pack_create(store, path);
 
 	if (rc != CAS_OK) {
 		fprintf(stderr, "%s: pack failed: %s\n",
@@ -860,7 +885,7 @@ cmd_pack(struct cas_tree *ct, int argc, char **argv)
 		return 1;
 	}
 
-	fprintf(stderr, "pack: ok\n");
+	fprintf(stderr, "pack: ok%s\n", did_compress ? " (compressed)" : "");
 	return 0;
 }
 
@@ -886,7 +911,7 @@ static const struct command commands[] = {
 	{ "hash",   cmd_hash,   "hash [file]" },
 	{ "fsck",   cmd_fsck,   "fsck" },
 	{ "gc",     cmd_gc,     "gc" },
-	{ "pack",   cmd_pack,   "pack loose objects" },
+	{ "pack",   cmd_pack,   "pack [-z] loose objects (-z compresses)" },
 };
 
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
