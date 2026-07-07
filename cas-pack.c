@@ -50,6 +50,27 @@ write_full(int fd, const void *data, size_t len)
 	return CAS_OK;
 }
 
+/* The index and footer store their 64-bit fields little-endian on
+ * disk so a packfile is byte-identical across architectures.  Every
+ * multi-byte integer goes through these helpers; the hash and header
+ * bytes are already endian-neutral. */
+static void
+store_le64(unsigned char *p, uint64_t v)
+{
+	for (int i = 0; i < 8; i++)
+		p[i] = (unsigned char)(v >> (i * 8));
+}
+
+static uint64_t
+load_le64(const unsigned char *p)
+{
+	uint64_t v = 0;
+
+	for (int i = 0; i < 8; i++)
+		v |= (uint64_t)p[i] << (i * 8);
+	return v;
+}
+
 static int
 parse_header(const char *hdr, size_t hdrsz,
              char *type_out, size_t type_bufsz,
@@ -139,7 +160,7 @@ cas_pack_open(const char *path)
 		return NULL;
 	}
 
-	uint64_t count = ft->entry_count;
+	uint64_t count = load_le64((const unsigned char *)&ft->entry_count);
 	size_t index_size = (size_t)count * CAS_PACK_BLOCK;
 	size_t tail_size = index_size + CAS_PACK_BLOCK;
 
@@ -234,7 +255,7 @@ cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
 	if (!e)
 		return CAS_ENOTFOUND;
 
-	uint64_t trailer_off = e->offset;
+	uint64_t trailer_off = load_le64((const unsigned char *)&e->offset);
 
 	if (trailer_off + CAS_PACK_BLOCK > pack->maplen)
 		return CAS_ERR;
@@ -265,8 +286,8 @@ cas_pack_lookup(struct cas_pack *pack, struct cas_file *cf,
 	/* stored_size is the on-disk region length; a zero value
 	 * means "same as the plaintext length" for packs written
 	 * before compression existed. */
-	uint64_t region_size = e->stored_size ? e->stored_size
-	                                       : content_len;
+	uint64_t stored = load_le64((const unsigned char *)&e->stored_size);
+	uint64_t region_size = stored ? stored : content_len;
 
 	if (region_size > trailer_off)
 		return CAS_ERR;
@@ -357,7 +378,8 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 
 		cas_hex_encode(e->hash, CAS_HASH_LEN, hex);
 
-		uint64_t trailer_off = e->offset;
+		uint64_t trailer_off =
+			load_le64((const unsigned char *)&e->offset);
 
 		if (trailer_off + CAS_PACK_BLOCK > pack->maplen) {
 			status = CAS_FSCK_IOERR;
@@ -394,8 +416,9 @@ cas_pack_fsck(struct cas_pack *pack, cas_fsck_fn fn, void *ctx)
 			goto report;
 		}
 
-		uint64_t region_size = e->stored_size ? e->stored_size
-		                                       : content_len;
+		uint64_t stored =
+			load_le64((const unsigned char *)&e->stored_size);
+		uint64_t region_size = stored ? stored : content_len;
 
 		if (region_size > trailer_off) {
 			status = CAS_FSCK_CORRUPT;
@@ -646,12 +669,12 @@ pack_create(struct cas *store, const char *path, int policy, int codec)
 		}
 
 		memcpy(index[i].hash, hl.hashes[i], CAS_HASH_LEN);
-		index[i].offset = offset;
+		store_le64((unsigned char *)&index[i].offset, offset);
 		/* a compressed region differs from the plaintext length,
 		 * so record it; leave zero when they match for
 		 * compatibility with packs written before compression */
-		index[i].stored_size = (emit_size == content_len)
-		                       ? 0 : emit_size;
+		store_le64((unsigned char *)&index[i].stored_size,
+		           (emit_size == content_len) ? 0 : emit_size);
 
 		offset += CAS_PACK_BLOCK;
 	}
@@ -673,7 +696,7 @@ pack_create(struct cas *store, const char *path, int policy, int codec)
 		CAS_PACK_FOOTER_MAGIC_V1;
 
 	memcpy(ft.magic, footer_magic, CAS_PACK_MAGIC_LEN);
-	ft.entry_count = (uint64_t)hl.count;
+	store_le64((unsigned char *)&ft.entry_count, (uint64_t)hl.count);
 	memset(ft.reserved, 0, sizeof(ft.reserved));
 	memset(ft.checksum, 0, sizeof(ft.checksum));
 

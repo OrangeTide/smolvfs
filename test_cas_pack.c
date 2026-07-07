@@ -122,6 +122,70 @@ test_pack_create_open(void)
 	cas_free(store);
 }
 
+/****************************************************************
+ * test_pack_endianness
+ *
+ * The packfile index and footer must store their 64-bit fields
+ * little-endian so a pack is byte-identical across architectures.
+ * Inspect the raw bytes: the low-order byte leads and the high
+ * bytes are zero for small values.  This fails on any host that
+ * writes the fields in native (e.g. big-endian) order.
+ ****************************************************************/
+
+static void
+test_pack_endianness(void)
+{
+	char depot[512], packpath[512];
+
+	snprintf(depot, sizeof(depot), "%s/endian", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
+	         depot);
+
+	struct cas *store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	char h1[CAS_HASH_HEX + 1], h2[CAS_HASH_HEX + 1];
+	ASSERT_INT_EQ(cas_put(store, "alpha", 5, h1), CAS_OK);
+	ASSERT_INT_EQ(cas_put(store, "beta", 4, h2), CAS_OK);
+
+	ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+
+	int fd = open(packpath, O_RDONLY);
+	ASSERT(fd >= 0);
+	off_t sz = lseek(fd, 0, SEEK_END);
+	lseek(fd, 0, SEEK_SET);
+	ASSERT(sz >= 3 * CAS_PACK_BLOCK);
+
+	unsigned char *buf = malloc((size_t)sz);
+	ASSERT(buf != NULL);
+	ASSERT_INT_EQ((int)read(fd, buf, (size_t)sz), (int)sz);
+	close(fd);
+
+	/* footer is the last block; entry_count is the 8 bytes after
+	 * the 8-byte magic.  Two objects, so byte[0] == 2, rest zero. */
+	const unsigned char *ec = buf + sz - CAS_PACK_BLOCK
+	                          + CAS_PACK_MAGIC_LEN;
+	ASSERT_INT_EQ(ec[0], 2);
+	for (int i = 1; i < 8; i++)
+		ASSERT_INT_EQ(ec[i], 0);
+
+	/* first index entry precedes the footer by two blocks; its
+	 * offset field (after the 32-byte hash) must little-endian
+	 * decode to a valid in-file trailer offset. */
+	const unsigned char *e0 = buf + sz - 3 * CAS_PACK_BLOCK;
+	const unsigned char *offp = e0 + CAS_HASH_LEN;
+	uint64_t off = 0;
+	for (int i = 0; i < 8; i++)
+		off |= (uint64_t)offp[i] << (i * 8);
+	ASSERT(off + CAS_PACK_BLOCK <= (uint64_t)sz);
+
+	unsigned char magic_v1[] = CAS_PACK_TRAILER_MAGIC;
+	ASSERT(memcmp(buf + off, magic_v1, CAS_PACK_MAGIC_LEN) == 0);
+
+	free(buf);
+	cas_free(store);
+}
+
 #ifdef CAS_WITH_MINIZ
 /****************************************************************
  * test_pack_compressed
@@ -686,6 +750,7 @@ main(void)
 	fprintf(stderr, "--- cas-pack tests ---\n");
 
 	RUN(test_pack_create_open);
+	RUN(test_pack_endianness);
 #ifdef CAS_WITH_MINIZ
 	RUN(test_pack_compressed);
 	RUN(test_pack_create_z);
