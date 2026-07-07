@@ -1496,6 +1496,22 @@ vfs_snap_restore(struct vfs *fs, const struct vfs_cred *cred,
 Recursively restore a CAS tree into VFS, creating files and directories
 under root.
 
+```c
+int
+vfs_snap_restore_at(struct vfs *fs, const struct vfs_cred *cred,
+                    struct cas_tree *ct, const char *base_path,
+                    const char *root_hash);
+```
+
+Like `vfs_snap_restore`, but lands the tree under an absolute directory
+prefix instead of at the root.  This mounts a snapshot as a
+subdirectory, for example installing a downloaded module at
+`/modules/coolmod` while the rest of the filesystem is untouched.  The
+prefix and any missing parents are created, so an empty tree still
+yields the directory; passing `"/"` is identical to `vfs_snap_restore`.
+Because the target VFS shares one CAS, mounting several bundles dedups
+identical objects across them for free.
+
 #### Ref convenience
 
 ```c
@@ -1514,6 +1530,16 @@ vfs_snap_checkout(struct vfs *fs, const struct vfs_cred *cred,
 ```
 
 Read a ref and restore into VFS.
+
+```c
+int
+vfs_snap_checkout_at(struct vfs *fs, const struct vfs_cred *cred,
+                     struct cas_tree *ct, const char *base_path,
+                     const char *ref);
+```
+
+Read a ref and restore into VFS under an absolute directory prefix (see
+`vfs_snap_restore_at`).
 
 #### Integrity checking
 

@@ -860,6 +860,132 @@ test_fsck_type_mismatch(void)
 }
 
 /****************************************************************
+ * restore_at: mount a bundle under a directory prefix
+ ****************************************************************/
+
+static void
+test_snap_restore_at(void)
+{
+    struct cas *store = make_store("restore_at");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    /* build a module bundle: a file and a subdir with a file */
+    struct vfs *mod = vfs_new(NULL);
+
+    ASSERT_INT_EQ(vfs_write(mod, &admin, "/data.txt", "MODULE", 6, 1),
+                  VFS_OK);
+    ASSERT_INT_EQ(vfs_mkdir(mod, &admin, "/sub", 0), VFS_OK);
+    ASSERT_INT_EQ(vfs_write(mod, &admin, "/sub/inner.bin", "XYZ", 3, 0),
+                  VFS_OK);
+
+    char modhash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(vfs_snap_store(mod, &admin, ct, modhash), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_ref_commit(ct, "coolmod", modhash, "v1"),
+                  CAS_OK);
+
+    /* target VFS with unrelated pre-existing content */
+    struct vfs *game = vfs_new(NULL);
+
+    ASSERT_INT_EQ(vfs_write(game, &admin, "/game.cfg", "root", 4, 1),
+                  VFS_OK);
+
+    /* mount the module under a not-yet-existing prefix */
+    ASSERT_INT_EQ(vfs_snap_restore_at(game, &admin, ct,
+                  "/modules/coolmod", modhash), CAS_OK);
+
+    const void *data;
+    size_t len;
+
+    ASSERT_INT_EQ(vfs_read(game, &admin, "/modules/coolmod/data.txt",
+                  &data, &len), VFS_OK);
+    ASSERT_INT_EQ((int)len, 6);
+    ASSERT(memcmp(data, "MODULE", 6) == 0);
+    ASSERT_INT_EQ(vfs_read(game, &admin,
+                  "/modules/coolmod/sub/inner.bin", &data, &len),
+                  VFS_OK);
+    ASSERT_INT_EQ((int)len, 3);
+
+    /* pre-existing content untouched */
+    ASSERT_INT_EQ(vfs_read(game, &admin, "/game.cfg", &data, &len),
+                  VFS_OK);
+
+    /* the mount point is a directory */
+    struct vfs_stat st;
+
+    ASSERT_INT_EQ(vfs_stat(game, &admin, "/modules/coolmod", &st),
+                  VFS_OK);
+    ASSERT_INT_EQ(st.type, VFS_DIR);
+
+    /* checkout_at resolves a ref and mounts under a second prefix;
+     * the shared store dedups the objects behind both mounts */
+    ASSERT_INT_EQ(vfs_snap_checkout_at(game, &admin, ct,
+                  "/modules/copy", "coolmod"), CAS_OK);
+    ASSERT_INT_EQ(vfs_read(game, &admin, "/modules/copy/data.txt",
+                  &data, &len), VFS_OK);
+    ASSERT_INT_EQ((int)len, 6);
+
+    /* a trailing slash on the prefix is tolerated */
+    ASSERT_INT_EQ(vfs_snap_restore_at(game, &admin, ct,
+                  "/modules/trail/", modhash), CAS_OK);
+    ASSERT_INT_EQ(vfs_read(game, &admin, "/modules/trail/data.txt",
+                  &data, &len), VFS_OK);
+
+    /* a non-absolute prefix is rejected */
+    ASSERT_INT_EQ(vfs_snap_restore_at(game, &admin, ct,
+                  "rel/path", modhash), CAS_ERR);
+
+    /* base "/" behaves like plain restore */
+    struct vfs *g2 = vfs_new(NULL);
+
+    ASSERT_INT_EQ(vfs_snap_restore_at(g2, &admin, ct, "/", modhash),
+                  CAS_OK);
+    ASSERT_INT_EQ(vfs_read(g2, &admin, "/data.txt", &data, &len),
+                  VFS_OK);
+
+    /* an unknown ref propagates the not-found error */
+    ASSERT_INT_EQ(vfs_snap_checkout_at(game, &admin, ct,
+                  "/modules/nope", "missing"), CAS_ENOTFOUND);
+
+    vfs_free(g2);
+    vfs_free(game);
+    vfs_free(mod);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
+ * restore_at: an empty bundle still creates the mount point
+ ****************************************************************/
+
+static void
+test_snap_restore_at_empty(void)
+{
+    struct cas *store = make_store("restore_at_empty");
+    struct cas_tree *ct = cas_tree_new(store);
+    struct vfs *empty = vfs_new(NULL);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(vfs_snap_store(empty, &admin, ct, h), CAS_OK);
+
+    struct vfs *game = vfs_new(NULL);
+
+    ASSERT_INT_EQ(vfs_snap_restore_at(game, &admin, ct, "/mods/void", h),
+                  CAS_OK);
+
+    struct vfs_stat st;
+
+    ASSERT_INT_EQ(vfs_stat(game, &admin, "/mods/void", &st), VFS_OK);
+    ASSERT_INT_EQ(st.type, VFS_DIR);
+
+    vfs_free(game);
+    vfs_free(empty);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -882,6 +1008,8 @@ main(void)
 #endif
     RUN(test_snap_deterministic);
     RUN(test_snap_commit_checkout);
+    RUN(test_snap_restore_at);
+    RUN(test_snap_restore_at_empty);
     RUN(test_snap_versioning);
     RUN(test_snap_empty_file);
     RUN(test_snap_sharing);

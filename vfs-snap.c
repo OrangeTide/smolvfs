@@ -258,6 +258,40 @@ vfs_snap_restore(struct vfs *fs, const struct vfs_cred *cred,
                        root_hash);
 }
 
+int
+vfs_snap_restore_at(struct vfs *fs, const struct vfs_cred *cred,
+                    struct cas_tree *ct, const char *base_path,
+                    const char *root_hash)
+{
+    if (!base_path || base_path[0] != '/')
+        return CAS_ERR;
+
+    /* Create the mount point (and any missing parents) up front so
+     * even an empty bundle leaves the directory in place; mkdir -p
+     * semantics make an existing directory a no-op. */
+    int rc = vfs_mkdir(fs, cred, base_path, 1);
+
+    if (rc != VFS_OK)
+        return CAS_ERR;
+
+    /* Strip trailing slashes so restore_dir composes "base/name"
+     * without a doubled separator; a bare root stays "/". */
+    size_t n = strlen(base_path);
+
+    while (n > 1 && base_path[n - 1] == '/')
+        n--;
+    if (n >= SNAP_PATH_MAX)
+        return CAS_ERR;
+
+    char base[SNAP_PATH_MAX];
+
+    memcpy(base, base_path, n);
+    base[n] = '\0';
+
+    return restore_dir(fs, cred, ct, cas_tree_cas(ct), base,
+                       root_hash);
+}
+
 /****************************************************************
  * Ref convenience
  ****************************************************************/
@@ -301,6 +335,20 @@ vfs_snap_checkout(struct vfs *fs, const struct vfs_cred *cred,
     if (rc != CAS_OK)
         return rc;
     return vfs_snap_restore(fs, cred, ct, hash);
+}
+
+int
+vfs_snap_checkout_at(struct vfs *fs, const struct vfs_cred *cred,
+                     struct cas_tree *ct, const char *base_path,
+                     const char *ref)
+{
+    char hash[CAS_HASH_HEX + 1];
+
+    int rc = cas_tree_ref_read(ct, ref, hash);
+
+    if (rc != CAS_OK)
+        return rc;
+    return vfs_snap_restore_at(fs, cred, ct, base_path, hash);
 }
 
 /****************************************************************

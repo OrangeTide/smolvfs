@@ -41,6 +41,18 @@ int
 vfs_snap_restore(struct vfs *fs, const struct vfs_cred *cred,
                  struct cas_tree *ct, const char *root_hash);
 
+/** Restore a CAS tree into VFS under an absolute directory prefix.
+ *  The tree's entries land under base_path (for example mounting a
+ *  downloaded module at "/modules/coolmod"); the prefix and any
+ *  missing parents are created, so an empty tree still yields the
+ *  directory.  Passing "/" is equivalent to vfs_snap_restore.
+ *  base_path must be absolute.
+ */
+int
+vfs_snap_restore_at(struct vfs *fs, const struct vfs_cred *cred,
+                    struct cas_tree *ct, const char *base_path,
+                    const char *root_hash);
+
 /****************************************************************
  * Ref convenience
  ****************************************************************/
@@ -62,6 +74,13 @@ vfs_snap_commit_z(struct vfs *fs, const struct vfs_cred *cred,
 int
 vfs_snap_checkout(struct vfs *fs, const struct vfs_cred *cred,
                   struct cas_tree *ct, const char *ref);
+
+/** Read a ref and restore into VFS under an absolute directory
+ *  prefix (see vfs_snap_restore_at). */
+int
+vfs_snap_checkout_at(struct vfs *fs, const struct vfs_cred *cred,
+                     struct cas_tree *ct, const char *base_path,
+                     const char *ref);
 
 /****************************************************************
  * Integrity checking: VFS vs snapshot
