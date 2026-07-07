@@ -192,6 +192,7 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `fsck` | `fsck` | Verify integrity of all reachable trees and blobs |
 | `gc` | `gc` | Remove unreachable objects older than one hour |
 | `pack` | `pack [-z]` | Pack loose objects into `pack.dat`; `-z` compresses |
+| `import-pack` | `import-pack [-z] <pack-file> [<ref> <root-hash>]` | Merge a downloaded bundle (packfile) into this depot, deduplicated; optionally pin a ref to its root |
 
 Where a command accepts `<ref-or-hash>`, either a ref name or a 64-character
 hex hash may be used.
@@ -222,6 +223,31 @@ raw, so importing a mix of source and media only pays compression on
 what benefits.  Both paths store blobs at their plaintext address, so
 they interoperate: an object imported with `-z` and later packed is
 already compressed and copied through unchanged.
+
+**Bundles and caches:** a packfile is self-contained, so it doubles as
+a transport bundle.  A server can `pack` a snapshot's objects and ship
+the file; a client merges it into a shared depot with `import-pack`,
+which re-verifies every object's address before storing it and skips
+objects already present.  Because many bundles land in one CAS,
+identical objects (shared assets across modules) are stored once.
+
+```sh
+# server: bundle a module, note its root hash from the ref log
+castool -d build pack
+castool -d build log module1 | head -1
+
+# client: merge into the cache depot and pin the module's root
+castool -d cache import-pack module1.pack module1 <root-hash>
+```
+
+Pinning a ref (the optional `<ref> <root-hash>`) makes the imported
+tree reachable and gc-safe; the application then mounts it into a live
+VFS at any prefix with `vfs_snap_checkout_at`.  `import-pack -z`
+recompresses stored objects under `CAS_COMPRESS_GUESS`; without `-z`
+they are stored raw (a later `pack -z` compresses them).  Downloading
+a whole bundle does not skip objects the client already has over the
+wire, only on disk; a fetch-only-what-is-missing protocol would build
+on `cas_exists` and is out of scope here.
 
 **@file expansion:** any argument starting with `@` is expanded to lines read
 from the named file (`@files.txt` reads `files.txt`, one argument per line).
@@ -1041,6 +1067,26 @@ data and comparing against the stored hash.  Uses the same `cas_fsck_fn`
 callback as `cas_fsck`.
 
 **Returns:** `CAS_OK` if all objects passed, `CAS_ERR` if any failed.
+
+```c
+int
+cas_pack_import(struct cas_pack *pack, struct cas *store,
+                int policy, int codec, uint64_t *total_out,
+                uint64_t *stored_out);
+```
+
+Merge every object from a packfile into `store`, deduplicated by
+address.  Each object is re-verified against its decoded content before
+being stored, so a bundle from an untrusted server cannot poison the
+depot: a mismatch aborts with `CAS_ERR` and that object is not written
+(objects merged earlier in the call remain, so import is not atomic).
+Objects already present are skipped.  `policy` and `codec` control
+compression exactly as `cas_put_object_z` does; pass
+`CAS_COMPRESS_NEVER` to store raw.  If non-NULL, `*total_out` receives
+the number of objects processed and `*stored_out` the number newly
+written.  This backs `castool import-pack`.
+
+**Returns:** `CAS_OK` on success.
 
 ### CAS iteration, integrity, and removal
 
