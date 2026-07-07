@@ -323,7 +323,8 @@ of any transported bundle:
 <depot>/pack.dat          optional packfile, read transparently
 <depot>/refs/<name>.root  a ref: a file holding a 64-hex root address
 <depot>/refs/<name>.log   append-only commit log for that ref
-<depot>/refs/<name>.lock  lock file guarding ref updates
+<depot>/refs/<name>.prev  previous root, kept for crash recovery
+<depot>/refs/<name>.lock  transient lock held during a ref update
 ```
 
 When present, `pack.dat` is consulted alongside loose objects: a lookup

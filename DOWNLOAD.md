@@ -76,11 +76,11 @@ This yields git-style minimal fetching without any server participation.
 ## Discovery
 
 The client obtains the root address by fetching a ref's `.root` file
-(the atomically-updated current value; the sibling `.log` history and
-`.lock` file are local depot state and are not needed remotely):
+(the atomically-updated current value; the sibling `.log`, `.prev`, and
+`.lock` files are local depot state and are not needed remotely):
 
 ```
-GET <base>/refs/<name>.root   ->  "8eb26db6...>"  (64 hex + newline)
+GET <base>/refs/<name>.root   ->  8eb26db6...  (64 hex + newline)
 ```
 
 The root address is the entry point for the walk and the anchor of the

@@ -1209,9 +1209,9 @@ exist as a loose file.
 |----------|-------|-------------|
 | `CAS_HASH_LEN` | 32 | BLAKE2b-256 digest size in bytes |
 | `CAS_HASH_HEX` | 64 | Hex-encoded digest length (not counting NUL) |
-| `CAS_TYPE_MAX` | 16 | Maximum length of object type string (legacy) |
+| `CAS_TYPE_MAX` | 16 | Maximum length of object type string |
 | `CAS_PACK_BLOCK` | 64 | On-disk block size for trailers, index entries, footer |
-| `CAS_PACK_HEADER_LEN` | 56 | Usable header space in a trailer (type: 8 + len: 18) |
+| `CAS_PACK_HEADER_LEN` | 56 | Nul-padded space in a trailer for the `"type len\0"` header string |
 
 ## Design
 
