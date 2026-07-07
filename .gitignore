@@ -6,6 +6,8 @@
 *.debug
 smolvfs
 test_cas
+test_cas_codec
+test_cas_omap
 test_cas_pack
 test_vfs
 test_cas_tree

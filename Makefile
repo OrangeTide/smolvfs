@@ -6,35 +6,54 @@ CFLAGS := -Wall -Wextra -g -Og -fno-omit-frame-pointer
 # CPPFLAGS := -NDEBUG
 SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
-DEPS := $(SRCS:.c=.d)
+DEPS := $(SRCS:.c=.dep)
 LIB := libvfs.a
-LIBSRCS := vfs.c cas.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c
+LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c
 LIBOBJS := $(LIBSRCS:.c=.o)
-DEPS += $(LIBSRCS:.c=.d)
-TEST_SRCS = test_cas.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c
+DEPS += $(LIBSRCS:.c=.dep)
+
+# Optional bundled DEFLATE codec (miniz).  Build with MINIZ=1 to
+# vendor third_party/miniz.{c,h} and register the 'Z' codec.
+ifdef MINIZ
+CPPFLAGS += -DCAS_WITH_MINIZ -DMINIZ_NO_STDIO
+MINIZ_OBJS := cas-codec-miniz.o third_party/miniz.o
+endif
+
+TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c
 TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
+DEPS += $(TEST_SRCS:.c=.dep)
 compile.c = $(CC) -c -o $@ -MMD -MF $(@:.o=.dep) $(CFLAGS) $(CPPFLAGS) $<
-smolvfs: $(OBJS) $(LIB)
+smolvfs: $(OBJS) $(LIB) $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
 	$(OBJCOPY) --only-keep-debug $@ $@.debug
 	$(STRIP) --strip-debug --strip-unneeded $@
 	$(OBJCOPY) --add-gnu-debuglink=$@.debug $@
-castool: castool.o cas-tree.o cas-pack.o cas.o
+castool: castool.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
-test_cas: test_cas.o cas-pack.o cas.o
+test_cas: test_cas.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_vfs: test_vfs.o vfs.o
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
-test_cas_tree: test_cas_tree.o cas-tree.o cas-pack.o cas.o
+test_cas_tree: test_cas_tree.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
-test_vfs_snap: test_vfs_snap.o vfs-snap.o vfs.o cas-tree.o cas-pack.o cas.o
+test_vfs_snap: test_vfs_snap.o vfs-snap.o vfs.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
 $(LIB) : $(LIBOBJS)
 	$(AR) $(ARFLAGS) $@ $^
 vfs.o : vfs.c
 	$(compile.c)
 cas.o : cas.c
+	$(compile.c)
+cas-codec.o : cas-codec.c
+	$(compile.c)
+cas-codec-miniz.o : cas-codec-miniz.c
+	$(compile.c)
+third_party/miniz.o : third_party/miniz.c
+	$(CC) -c -o $@ -MMD -MF $(@:.o=.dep) -O2 $(CPPFLAGS) $<
+test_cas_codec: test_cas_codec.o cas-codec.o $(MINIZ_OBJS)
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
+test_cas_codec.o : test_cas_codec.c
 	$(compile.c)
 sample_main.o : sample_main.c
 	$(compile.c)
@@ -52,11 +71,11 @@ test_vfs_snap.o : test_vfs_snap.c
 	$(compile.c)
 cas-pack.o : cas-pack.c
 	$(compile.c)
-test_cas_pack: test_cas_pack.o cas-pack.o cas.o
+test_cas_pack: test_cas_pack.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_cas_pack.o : test_cas_pack.c
 	$(compile.c)
-test_cas_omap: test_cas_omap.o cas-omap.o cas-pack.o cas.o
+test_cas_omap: test_cas_omap.o cas-omap.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_cas_omap.o : test_cas_omap.c
 	$(compile.c)
@@ -65,9 +84,9 @@ cas-omap.o : cas-omap.c
 castool.o : castool.c
 	$(compile.c)
 clean:
-	$(RM) $(OBJS) $(TEST_OBJS)
+	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) cas-codec-miniz.o third_party/miniz.o
 clean-all: clean
-	$(RM) smolvfs smolvfs.debug castool libvfs.a $(TEST_BINS) $(DEPS)
+	$(RM) smolvfs smolvfs.debug castool libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep
 test: $(TEST_BINS)
 	./test.sh
 smoke: $(TEST_BINS)
