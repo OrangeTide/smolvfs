@@ -13,6 +13,7 @@ test_vfs
 test_cas_tree
 test_vfs_snap
 castool
+cas-fetch
 
 # editor swap/backup files
 *~

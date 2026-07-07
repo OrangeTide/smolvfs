@@ -31,6 +31,11 @@ smolvfs: $(OBJS) $(LIB) $(MINIZ_OBJS)
 	$(OBJCOPY) --add-gnu-debuglink=$@.debug $@
 castool: castool.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
+# Reference incremental HTTP downloader (examples/).  Needs libcurl-dev;
+# build with MINIZ=1 for compressed depots.  Not built by default.
+CURL_LIBS ?= -lcurl
+cas-fetch: examples/cas-fetch.c cas.o cas-tree.o cas-pack.o cas-codec.o $(MINIZ_OBJS)
+	$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -I. $(LDFLAGS) $^ $(CURL_LIBS) $(LDLIBS)
 test_cas: test_cas.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_vfs: test_vfs.o vfs.o
@@ -86,7 +91,7 @@ castool.o : castool.c
 clean:
 	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) cas-codec-miniz.o third_party/miniz.o
 clean-all: clean
-	$(RM) smolvfs smolvfs.debug castool libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep
+	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep
 test: $(TEST_BINS)
 	./test.sh
 smoke: $(TEST_BINS)
