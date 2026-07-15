@@ -30,6 +30,67 @@ const char *
 cas_strerror(int err);
 
 /****************************************************************
+ * Logging (optional, disabled by default)
+ ****************************************************************/
+
+/** Logging event codes. Stock messages are provided by cas_log_strerror().
+ *  Callers provide context via __FILE__ and __LINE__ pointers.
+ */
+enum cas_log_code {
+    /* Open/read operations */
+    CAS_LOG_OPEN_START = 1,
+    CAS_LOG_OPEN_MMAP,
+    CAS_LOG_OPEN_DECODE_START,
+    CAS_LOG_OPEN_DECODE_DONE,
+
+    /* Write operations */
+    CAS_LOG_PUT_TEMP_CREATE = 20,
+    CAS_LOG_PUT_WRITE_DATA,
+    CAS_LOG_PUT_FSYNC,
+    CAS_LOG_PUT_RENAME,
+
+    /* Lock operations */
+    CAS_LOG_LOCK_ACQUIRE = 40,
+    CAS_LOG_LOCK_RELEASE,
+
+    /* Iteration/fsck */
+    CAS_LOG_FOREACH_START = 60,
+    CAS_LOG_FSCK_CHECK,
+
+    /* Errors */
+    CAS_LOG_ERR_LOCK_FAILED = 100,
+    CAS_LOG_ERR_MALLOC,
+    CAS_LOG_ERR_MMAP,
+    CAS_LOG_ERR_WRITE,
+    CAS_LOG_ERR_DECODE,
+    CAS_LOG_ERR_UNLINK,
+    CAS_LOG_ERR_RENAME,
+    CAS_LOG_ERR_FSYNC,
+};
+
+/** Logging callback type. Called with event code, source location, and optional
+ *  message. Stock message is available via cas_log_strerror(code).
+ *  msg may be NULL; file and line are always valid.
+ */
+typedef void (*cas_log_fn)(int code, const char *file, int line,
+                           const char *msg, void *ctx);
+
+/** Register a logging callback. Only one callback may be active at a time.
+ *  Returns CAS_OK on success, CAS_ENOMEM on allocation failure.
+ *  Call cas_log_unregister() to disable logging.
+ */
+int
+cas_log_register(cas_log_fn fn, void *ctx);
+
+/** Unregister the logging callback and disable logging. */
+void
+cas_log_unregister(void);
+
+/** Return the stock message for a logging event code. */
+const char *
+cas_log_strerror(int code);
+
+/****************************************************************
  * Data structures
  ****************************************************************/
 

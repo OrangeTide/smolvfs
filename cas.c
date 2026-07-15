@@ -70,6 +70,78 @@ cas_strerror(int err)
 }
 
 /****************************************************************
+ * Logging (optional, runtime-configurable)
+ ****************************************************************/
+
+static cas_log_fn cas__log_callback = NULL;
+static void *cas__log_ctx = NULL;
+
+int
+cas_log_register(cas_log_fn fn, void *ctx)
+{
+    cas__log_callback = fn;
+    cas__log_ctx = ctx;
+    return CAS_OK;
+}
+
+void
+cas_log_unregister(void)
+{
+    cas__log_callback = NULL;
+    cas__log_ctx = NULL;
+}
+
+const char *
+cas_log_strerror(int code)
+{
+    switch (code) {
+    /* Open/read operations */
+    case CAS_LOG_OPEN_START:        return "open object";
+    case CAS_LOG_OPEN_MMAP:         return "mmap region";
+    case CAS_LOG_OPEN_DECODE_START: return "decompress start";
+    case CAS_LOG_OPEN_DECODE_DONE:  return "decompress done";
+
+    /* Write operations */
+    case CAS_LOG_PUT_TEMP_CREATE:   return "create temp file";
+    case CAS_LOG_PUT_WRITE_DATA:    return "write data";
+    case CAS_LOG_PUT_FSYNC:         return "fsync";
+    case CAS_LOG_PUT_RENAME:        return "atomic rename";
+
+    /* Lock operations */
+    case CAS_LOG_LOCK_ACQUIRE:      return "acquire lock";
+    case CAS_LOG_LOCK_RELEASE:      return "release lock";
+
+    /* Iteration/fsck */
+    case CAS_LOG_FOREACH_START:     return "scan depot";
+    case CAS_LOG_FSCK_CHECK:        return "check object";
+
+    /* Errors */
+    case CAS_LOG_ERR_LOCK_FAILED:   return "lock failed";
+    case CAS_LOG_ERR_MALLOC:        return "malloc failed";
+    case CAS_LOG_ERR_MMAP:          return "mmap failed";
+    case CAS_LOG_ERR_WRITE:         return "write failed";
+    case CAS_LOG_ERR_DECODE:        return "decode failed";
+    case CAS_LOG_ERR_UNLINK:        return "unlink failed";
+    case CAS_LOG_ERR_RENAME:        return "rename failed";
+    case CAS_LOG_ERR_FSYNC:         return "fsync failed";
+    default:                        return "unknown event";
+    }
+}
+
+/** Internal helper: emit a log event if callback is registered. */
+static inline void
+cas__log_emit(int code, const char *file, int line, const char *msg)
+{
+    if (cas__log_callback != NULL) {
+        (*cas__log_callback)(code, file, line, msg, cas__log_ctx);
+    }
+}
+
+/** Macro for logging events. Compiles away if callback is not registered. */
+#define CAS_LOG(code, msg) \
+    cas__log_emit(code, __FILE__, __LINE__, msg)
+
+/****************************************************************
  * BLAKE2b-256 (RFC 7693)
  ****************************************************************/
 
@@ -385,10 +457,12 @@ cas_lock_depot(const char *basedir)
     };
 
     if (fcntl(fd, F_SETLKW, &lock) < 0) {
+        CAS_LOG(CAS_LOG_ERR_LOCK_FAILED, NULL);
         close(fd);
         return -1;
     }
 
+    CAS_LOG(CAS_LOG_LOCK_ACQUIRE, NULL);
     return fd;
 }
 
@@ -398,8 +472,10 @@ cas_lock_depot(const char *basedir)
 static void
 cas_unlock_depot(int lock_fd)
 {
-    if (lock_fd >= 0)
+    if (lock_fd >= 0) {
+        CAS_LOG(CAS_LOG_LOCK_RELEASE, NULL);
         close(lock_fd);
+    }
 }
 
 /****************************************************************
@@ -624,6 +700,8 @@ int
 cas_open_object(struct cas *store, struct cas_file *cf,
                 const char *hash, char *type_out, size_t type_bufsz)
 {
+    CAS_LOG(CAS_LOG_OPEN_START, hash);
+
     if (!valid_hash(hash))
         return CAS_ERR;
 
@@ -667,8 +745,12 @@ cas_open_object(struct cas *store, struct cas_file *cf,
     void *ptr = mmap(NULL, filesz, PROT_READ, MAP_PRIVATE, fd, 0);
 
     close(fd);
-    if (ptr == MAP_FAILED)
+    if (ptr == MAP_FAILED) {
+        CAS_LOG(CAS_LOG_ERR_MMAP, NULL);
         return CAS_EIO;
+    }
+
+    CAS_LOG(CAS_LOG_OPEN_MMAP, NULL);
 
     const struct cas_pack_trailer *tr =
         (const struct cas_pack_trailer *)
@@ -708,14 +790,19 @@ cas_open_object(struct cas *store, struct cas_file *cf,
     const unsigned char *data;
     size_t len;
     unsigned char *owned;
+
+    CAS_LOG(CAS_LOG_OPEN_DECODE_START, NULL);
     int rc = cas_codec_region_decode(ptr, filesz - CAS_PACK_BLOCK,
                                      framed, content_len,
                                      &data, &len, &owned);
 
     if (rc != CAS_OK) {
+        CAS_LOG(CAS_LOG_ERR_DECODE, NULL);
         munmap(ptr, filesz);
         return rc;
     }
+
+    CAS_LOG(CAS_LOG_OPEN_DECODE_DONE, NULL);
 
     if (owned) {
         /* decoded into a heap buffer; the source is no longer needed */
@@ -883,15 +970,19 @@ cas_put_object(struct cas *store, const char *type,
     if (fd < 0)
         return CAS_EIO;
 
+    CAS_LOG(CAS_LOG_PUT_TEMP_CREATE, NULL);
+
     int rc;
 
     if (len > 0) {
         rc = write_full(fd, data, len);
         if (rc != CAS_OK) {
+            CAS_LOG(CAS_LOG_ERR_WRITE, NULL);
             close(fd);
             unlink(tmp);
             return rc;
         }
+        CAS_LOG(CAS_LOG_PUT_WRITE_DATA, NULL);
     }
 
     struct cas_pack_trailer tr;
@@ -909,11 +1000,13 @@ cas_put_object(struct cas *store, const char *type,
     }
 
     if (fsync(fd) != 0) {
+        CAS_LOG(CAS_LOG_ERR_FSYNC, NULL);
         close(fd);
         unlink(tmp);
         return CAS_EIO;
     }
 
+    CAS_LOG(CAS_LOG_PUT_FSYNC, NULL);
     close(fd);
 
     /* Atomically move temp file to final location.
@@ -925,10 +1018,13 @@ cas_put_object(struct cas *store, const char *type,
      * serialized. Treat target existence as a dedup success.
      */
     if (rename(tmp, path) != 0) {
+        CAS_LOG(CAS_LOG_ERR_RENAME, NULL);
         unlink(tmp);
         if (access(path, F_OK) != 0)
             return CAS_EIO;
         /* Target exists: dedup success, fall through */
+    } else {
+        CAS_LOG(CAS_LOG_PUT_RENAME, NULL);
     }
 
     memcpy(hash_out, hash, CAS_HASH_HEX + 1);
