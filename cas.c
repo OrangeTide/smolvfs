@@ -2,6 +2,22 @@
 /* Copyright (c) 2026 Jon Mayo <jon@rm-f.net>
  * Licensed under BSD-2-Clause-Patent OR MIT */
 
+/* IMPLEMENTATION NOTES
+ *
+ * Path Limits (CAS_PATH_MAX):
+ *   Paths are limited to 512 bytes. For basedir/XX/HASH layout, this means
+ *   basedir should stay under 400 bytes to be safe. Operations that would
+ *   exceed the limit fail with CAS_ERR. Check build_path/build_dir return
+ *   values when using very long basedir paths (>350 bytes).
+ *
+ * Compression:
+ *   Objects are compressed only if:
+ *   1. Object size >= 512 bytes (skip codec overhead on tiny objects)
+ *   2. Compressed form saves > 12% of original size
+ *   Threshold: (payload + 1 byte tag) < 87.5% of original.
+ *   This avoids wasting CPU on incompressible data (images, video, etc.)
+ */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas.h"
