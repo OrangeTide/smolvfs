@@ -256,6 +256,7 @@ valid_hash(const char *hash)
 struct cas {
     char *basedir;
     struct cas_pack *pack;
+    int lock_fd;  /* exclusive lock on depot directory */
 };
 
 static int
@@ -283,6 +284,54 @@ build_dir(const struct cas *store, const char *hash,
 }
 
 /****************************************************************
+ * Locking
+ ****************************************************************/
+
+/** Acquire an exclusive lock on the depot.
+ *  Opens .lock file in basedir and locks it with fcntl.
+ *  Returns the open fd on success, or -1 on failure.
+ *  The lock is held until cas_unlock_depot() or process exit.
+ */
+static int
+cas_lock_depot(const char *basedir)
+{
+    char lockpath[CAS_PATH_MAX];
+    int n = snprintf(lockpath, sizeof(lockpath), "%s/.lock", basedir);
+
+    if (n < 0 || (size_t)n >= sizeof(lockpath))
+        return -1;
+
+    int fd = open(lockpath, O_WRONLY | O_CREAT, 0644);
+
+    if (fd < 0)
+        return -1;
+
+    struct flock lock = {
+        .l_type = F_WRLCK,     /* exclusive write lock */
+        .l_whence = SEEK_SET,
+        .l_start = 0,
+        .l_len = 0,            /* lock entire file */
+    };
+
+    if (fcntl(fd, F_SETLKW, &lock) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+/** Release the depot lock.
+ *  Closes the lock fd, which implicitly releases the lock.
+ */
+static void
+cas_unlock_depot(int lock_fd)
+{
+    if (lock_fd >= 0)
+        close(lock_fd);
+}
+
+/****************************************************************
  * Lifecycle
  ****************************************************************/
 
@@ -295,6 +344,13 @@ cas_new(const char *basedir)
         return NULL;
     store->basedir = strdup(basedir ? basedir : "depot");
     if (!store->basedir) {
+        free(store);
+        return NULL;
+    }
+
+    store->lock_fd = cas_lock_depot(store->basedir);
+    if (store->lock_fd < 0) {
+        free(store->basedir);
         free(store);
         return NULL;
     }
@@ -314,6 +370,7 @@ cas_free(struct cas *store)
     if (!store)
         return;
     cas_pack_close(store->pack);
+    cas_unlock_depot(store->lock_fd);
     free(store->basedir);
     free(store);
 }
