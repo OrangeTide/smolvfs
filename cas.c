@@ -444,6 +444,16 @@ write_full(int fd, const void *data, size_t len)
 static int
 format_header(char *buf, size_t bufsz, const char *type, size_t len)
 {
+    /* Validate type before formatting to prevent silent corruption.
+     * type must be non-empty and within CAS_TYPE_MAX.
+     * These preconditions match the expectations of parse_header.
+     */
+    if (!type || !*type)
+        return -1;
+    size_t typelen = strlen(type);
+    if (typelen > CAS_TYPE_MAX)
+        return -1;
+
     int n = snprintf(buf, bufsz, "%s %zu", type, len);
 
     if (n < 0 || (size_t)n + 1 > bufsz)
