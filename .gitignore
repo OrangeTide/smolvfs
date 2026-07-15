@@ -46,3 +46,6 @@ coverage-html/
 # core dumps
 core
 core.*
+
+# test-run depot artifact (cas_new(NULL) defaults to a relative "depot")
+depot/
