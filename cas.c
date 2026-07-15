@@ -23,6 +23,14 @@
  * Internal constants
  ****************************************************************/
 
+/** Maximum depot path length (512 bytes).
+ *  Paths are constructed as: basedir/XX/HASH where XX is the first
+ *  two hex digits of the hash (object sharding).
+ *  If a path would exceed 512 bytes (e.g., very long basedir),
+ *  build_path and build_dir return CAS_ERR. Callers should use
+ *  reasonable basedir paths (< 400 bytes recommended).
+ *  This limit is a practical constraint, not a security boundary.
+ */
 #define CAS_PATH_MAX    512
 #define CAS_HEADER_MAX  32
 #define BLAKE2B_BLOCKLEN 128
@@ -293,6 +301,11 @@ static int
 build_path(const struct cas *store, const char *hash,
            char *buf, size_t bufsz)
 {
+    /* Construct object path: basedir/XX/HASH
+     * Returns CAS_ERR if path would exceed buffer size (typically CAS_PATH_MAX).
+     * If basedir is very long (>400 bytes), this will fail.
+     * Use reasonable basedir paths to avoid truncation issues.
+     */
     int n = snprintf(buf, bufsz, "%s/%.2s/%s",
                      store->basedir, hash, hash);
 
@@ -305,6 +318,10 @@ static int
 build_dir(const struct cas *store, const char *hash,
           char *buf, size_t bufsz)
 {
+    /* Construct bucket directory path: basedir/XX
+     * Returns CAS_ERR if path would exceed buffer size (typically CAS_PATH_MAX).
+     * See build_path for notes on path length limits.
+     */
     int n = snprintf(buf, bufsz, "%s/%.2s",
                      store->basedir, hash);
 
@@ -1073,9 +1090,17 @@ cas_put_object_z(struct cas *store, const char *type, int codec,
         return CAS_OK;
     }
 
-    /* try to compress; keep it only if the payload plus its one
-     * codec tag byte beats the raw size by more than ~12% */
-    if (codec != CAS_CODEC_NONE && len > 0 &&
+    /* Try to compress; keep the compressed form only if the savings
+     * justify the codec overhead. For very small objects, compression
+     * adds more overhead (frame, header) than it saves, so skip for
+     * objects < 512 bytes. For larger objects, require >12% savings.
+     * The threshold plen + 1 < len - len/8 ensures:
+     *   - Compressed payload + codec tag < 87.5% of original
+     *   - Typical codecs (gzip, zstd) achieve >12% on most data
+     * Already-compressed data (e.g., JPEG) is not re-compressed,
+     * so codec attempt is a sunk cost; keep result only if it wins.
+     */
+    if (codec != CAS_CODEC_NONE && len >= 512 &&
         cas_codec_can_encode(codec)) {
         unsigned char *buf = malloc(len);
 
