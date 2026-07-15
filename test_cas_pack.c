@@ -86,7 +86,7 @@ fsck_counter(const char *hash, int status, void *ctx)
 static void
 test_pack_create_open(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/create", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -135,7 +135,7 @@ test_pack_create_open(void)
 static void
 test_pack_endianness(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/endian", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -198,7 +198,7 @@ test_pack_endianness(void)
 static void
 test_pack_compressed(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/compressed", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -287,7 +287,7 @@ test_pack_compressed(void)
 static void
 test_pack_create_z(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/create_z", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -363,7 +363,7 @@ test_pack_create_z(void)
 static void
 test_pack_create_z_always(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/create_z_always", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -433,7 +433,7 @@ test_pack_create_z_always(void)
 static void
 test_pack_create_z_no_encoder(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/create_z_noenc", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -479,7 +479,7 @@ test_pack_create_z_no_encoder(void)
 static void
 test_pack_lookup(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/lookup", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -535,7 +535,7 @@ test_pack_lookup(void)
 static void
 test_pack_exists(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/exists", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -568,7 +568,7 @@ test_pack_exists(void)
 static void
 test_pack_foreach(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/foreach", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -600,7 +600,7 @@ test_pack_foreach(void)
 static void
 test_pack_fsck(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/fsck", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -635,7 +635,7 @@ test_pack_fsck(void)
 static void
 test_pack_integrated(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/integrated", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -684,7 +684,7 @@ test_pack_integrated(void)
 static void
 test_pack_empty(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/empty", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -705,7 +705,7 @@ test_pack_empty(void)
 static void
 test_pack_empty_blob(void)
 {
-	char depot[512], packpath[512];
+	char depot[512], packpath[528];
 
 	snprintf(depot, sizeof(depot), "%s/empty_blob", tmpdir);
 	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
@@ -741,7 +741,7 @@ test_pack_empty_blob(void)
 static void
 test_pack_import(void)
 {
-	char src[512], tgt[512], packpath[512];
+	char src[512], tgt[512], packpath[528];
 
 	snprintf(src, sizeof(src), "%s/imp_src", tmpdir);
 	snprintf(tgt, sizeof(tgt), "%s/imp_tgt", tmpdir);
@@ -802,7 +802,7 @@ test_pack_import(void)
 static void
 test_pack_import_corrupt(void)
 {
-	char src[512], tgt[512], packpath[512];
+	char src[512], tgt[512], packpath[528];
 
 	snprintf(src, sizeof(src), "%s/impc_src", tmpdir);
 	snprintf(tgt, sizeof(tgt), "%s/impc_tgt", tmpdir);
@@ -859,7 +859,7 @@ test_pack_import_corrupt(void)
 static void
 test_pack_import_compressed(void)
 {
-	char src[512], tgt[512], packpath[512];
+	char src[512], tgt[512], packpath[528];
 
 	snprintf(src, sizeof(src), "%s/impz_src", tmpdir);
 	snprintf(tgt, sizeof(tgt), "%s/impz_tgt", tmpdir);
