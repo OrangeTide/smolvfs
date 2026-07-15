@@ -416,12 +416,15 @@ validate_basedir(const char *basedir)
         p++;
     }
 
-    /* If path exists, verify it with realpath to resolve any symlinks */
+    /* If path exists, verify it resolves cleanly.  realpath() can write
+     * up to PATH_MAX bytes, which exceeds any fixed CAS_PATH_MAX buffer,
+     * so let it allocate the result and free it. */
     if (access(basedir, F_OK) == 0) {
-        char canonical[CAS_PATH_MAX];
-        if (realpath(basedir, canonical) == NULL)
+        char *canonical = realpath(basedir, NULL);
+
+        if (canonical == NULL)
             return -1;  /* realpath failed or path is invalid */
-        /* Successfully validated via realpath */
+        free(canonical);
     }
 
     return 0;
