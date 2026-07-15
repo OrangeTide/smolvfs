@@ -10,7 +10,7 @@
  * .github/workflows/release.yml).  The version travels with the
  * source, so a vendored copy is identifiable from this header alone. */
 #define SMOLVFS_VERSION_MAJOR 0
-#define SMOLVFS_VERSION_MINOR 1
+#define SMOLVFS_VERSION_MINOR 2
 #define SMOLVFS_VERSION_PATCH 0
 
 #define SMOLVFS_VERSION_STR_(x) #x
