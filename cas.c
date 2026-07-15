@@ -535,6 +535,11 @@ cas_new(const char *basedir)
         return NULL;
     }
 
+    /* The lock file lives inside the depot, so the depot directory must
+     * exist before we can create it.  Historically the depot was made
+     * lazily on first write; the depot-wide lock now forces it here. */
+    mkdir(store->basedir, 0755);
+
     store->lock_fd = cas_lock_depot(store->basedir);
     if (store->lock_fd < 0) {
         free(store->basedir);
