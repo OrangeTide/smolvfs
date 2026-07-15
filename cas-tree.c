@@ -1003,6 +1003,233 @@ cas_tree_log_read(struct cas_tree *ct, const char *name,
     return CAS_OK;
 }
 
+/* Parse the leading "hash time_s" of a log line for retention.  Fills
+ * *time_s from the second field; returns CAS_OK if the line has at
+ * least a valid hash prefix and a parseable time_s. */
+static int
+log_line_time(const char *line, int64_t *time_s)
+{
+    if (strlen(line) < CAS_HASH_HEX + 1 ||
+        line[CAS_HASH_HEX] != ' ')
+        return CAS_ERR;
+
+    long long v;
+
+    if (sscanf(line + CAS_HASH_HEX + 1, "%lld", &v) != 1)
+        return CAS_ERR;
+    *time_s = (int64_t)v;
+    return CAS_OK;
+}
+
+int
+cas_tree_log_truncate(struct cas_tree *ct, const char *name,
+                      int keep_count, time_t keep_since, int *removed)
+{
+    if (!valid_ref_name(name))
+        return CAS_ERR;
+
+    /* Refuse a request that would keep nothing: an empty log is almost
+     * never what the caller means, and wiping every snapshot pointer is
+     * too dangerous to do by accident. */
+    if (keep_count <= 0 && keep_since <= 0)
+        return CAS_ERR;
+
+    char logpath[REF_PATH_MAX];
+    char lockpath[REF_PATH_MAX];
+    char logtmp[REF_PATH_MAX];
+
+    if (ref_path(ct->store, name, ".log", logpath, sizeof(logpath))
+        != CAS_OK ||
+        ref_path(ct->store, name, ".lock", lockpath, sizeof(lockpath))
+        != CAS_OK)
+        return CAS_ERR;
+
+    if (snprintf(logtmp, sizeof(logtmp), "%s.tmp", logpath) >=
+        (int)sizeof(logtmp))
+        return CAS_ERR;
+
+    int lockfd = open(lockpath, O_CREAT | O_WRONLY, 0644);
+
+    if (lockfd < 0)
+        return CAS_EIO;
+    if (flock(lockfd, LOCK_EX) != 0) {
+        close(lockfd);
+        return CAS_EIO;
+    }
+
+    FILE *fp = fopen(logpath, "r");
+
+    if (!fp) {
+        close(lockfd);
+        return CAS_ENOTFOUND;
+    }
+
+    /* Slurp the log into memory, one entry per kept line, preserving
+     * raw text so the rewrite is byte-for-byte faithful. */
+    char **lines = NULL;
+    int64_t *times = NULL;
+    int count = 0, cap = 0;
+    int rc = CAS_OK;
+    char buf[1024];
+
+    while (fgets(buf, sizeof(buf), fp)) {
+        size_t len = strlen(buf);
+
+        if (len > 0 && buf[len - 1] != '\n') {
+            /* A torn trailing write: drop it, as log_read does. */
+            if (feof(fp))
+                break;
+            rc = CAS_ERR;
+            break;
+        }
+        if (len > 0 && buf[len - 1] == '\n')
+            buf[--len] = '\0';
+
+        int64_t t;
+
+        if (log_line_time(buf, &t) != CAS_OK) {
+            rc = CAS_ERR;
+            break;
+        }
+
+        if (count == cap) {
+            int ncap = cap ? cap * 2 : 64;
+            char **nl = realloc(lines, (size_t)ncap * sizeof(*nl));
+
+            if (!nl) {
+                rc = CAS_ENOMEM;
+                break;
+            }
+            lines = nl;
+
+            int64_t *nt = realloc(times, (size_t)ncap * sizeof(*nt));
+
+            if (!nt) {
+                rc = CAS_ENOMEM;
+                break;
+            }
+            times = nt;
+            cap = ncap;
+        }
+
+        char *dup = strdup(buf);
+
+        if (!dup) {
+            rc = CAS_ENOMEM;
+            break;
+        }
+        lines[count] = dup;
+        times[count] = t;
+        count++;
+    }
+
+    fclose(fp);
+
+    if (rc != CAS_OK) {
+        for (int i = 0; i < count; i++)
+            free(lines[i]);
+        free(lines);
+        free(times);
+        close(lockfd);
+        return rc;
+    }
+
+    /* Decide which entries survive.  Lines are oldest-first, so the
+     * last keep_count entries are indices [count - keep_count, count).
+     * The two bounds are a union: an entry is kept if it is recent
+     * enough by count OR by age.  The newest entry (index count - 1) is
+     * always kept: a ref's live tree is protected during GC only by its
+     * log entries, and the newest entry is the current root.  Dropping
+     * it would let GC sweep the live world. */
+    int first_by_count = keep_count > 0 && keep_count < count
+                         ? count - keep_count : 0;
+    int gone = 0;
+
+    for (int i = 0; i < count; i++) {
+        int keep = i == count - 1;
+
+        if (keep_count > 0 && i >= first_by_count)
+            keep = 1;
+        if (keep_since > 0 && times[i] >= (int64_t)keep_since)
+            keep = 1;
+        if (!keep)
+            gone++;
+    }
+
+    if (gone == 0) {
+        for (int i = 0; i < count; i++)
+            free(lines[i]);
+        free(lines);
+        free(times);
+        close(lockfd);
+        if (removed)
+            *removed = 0;
+        return CAS_OK;
+    }
+
+    unlink(logtmp);
+
+    FILE *out = fopen(logtmp, "w");
+
+    if (!out) {
+        for (int i = 0; i < count; i++)
+            free(lines[i]);
+        free(lines);
+        free(times);
+        close(lockfd);
+        return CAS_EIO;
+    }
+
+    for (int i = 0; i < count; i++) {
+        int keep = i == count - 1;
+
+        if (keep_count > 0 && i >= first_by_count)
+            keep = 1;
+        if (keep_since > 0 && times[i] >= (int64_t)keep_since)
+            keep = 1;
+        if (!keep)
+            continue;
+        if (fprintf(out, "%s\n", lines[i]) < 0) {
+            rc = CAS_EIO;
+            break;
+        }
+    }
+
+    for (int i = 0; i < count; i++)
+        free(lines[i]);
+    free(lines);
+    free(times);
+
+    if (rc == CAS_OK && fflush(out) != 0)
+        rc = CAS_EIO;
+    if (rc == CAS_OK)
+        fsync(fileno(out));
+    fclose(out);
+
+    if (rc != CAS_OK) {
+        unlink(logtmp);
+        close(lockfd);
+        return rc;
+    }
+
+    if (rename(logtmp, logpath) != 0) {
+        unlink(logtmp);
+        close(lockfd);
+        return CAS_EIO;
+    }
+
+    char refsdir[REF_PATH_MAX];
+
+    snprintf(refsdir, sizeof(refsdir), "%s/refs",
+             cas_basedir(ct->store));
+    fsync_dir(refsdir);
+
+    close(lockfd);
+    if (removed)
+        *removed = gone;
+    return CAS_OK;
+}
+
 /****************************************************************
  * Ref iteration
  ****************************************************************/
@@ -1323,6 +1550,13 @@ mark_tree(struct cas_tree *ct, struct hash_set *reachable,
     struct cas_tree_dir dir;
     int rc = cas_tree_load(ct, tree_hash, &dir);
 
+    /* A missing object is a sparse boundary, not an error: history may
+     * have been pruned out from under a still-referenced ref.  The hash
+     * stays marked (harmless, nothing to sweep) and we stop descending
+     * here since the entry list is gone.  Corruption or I/O errors are
+     * still real failures and abort the mark. */
+    if (rc == CAS_ENOTFOUND)
+        return CAS_OK;
     if (rc != CAS_OK)
         return rc;
 

@@ -330,6 +330,19 @@ of any transported bundle:
 When present, `pack.dat` is consulted alongside loose objects: a lookup
 checks the pack, then the loose store. Refs name root objects (typically
 directory trees) so they are reachable and survive garbage collection.
+Every entry of a ref's `.log`, not just its current `.root`, marks its
+tree as reachable, so committed history is retained until the log entry
+is removed.
+
+A ref may be sparse: its log can name objects the depot no longer
+stores. The log is prunable. Truncating it to the last N entries (or to
+entries newer than a cutoff) discards old snapshots, after which garbage
+collection reclaims the objects those pruned snapshots alone reached.
+The newest log entry is always retained because it is the ref's live
+root. Garbage collection then treats a missing object as a boundary and
+stops descending there rather than failing, so a pruned depot is legal
+and incomplete rather than corrupt. A missing object is distinct from a
+corrupt or wrong-type one, which is still a hard error.
 
 ## Bundles and interoperation
 

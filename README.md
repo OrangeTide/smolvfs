@@ -207,7 +207,8 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `rm` | `rm <ref> <name>...` | Remove named entries from a ref's tree |
 | `hash` | `hash [file]` | Compute the blob hash of a file (or stdin) |
 | `fsck` | `fsck` | Verify integrity of all reachable trees and blobs |
-| `gc` | `gc` | Remove unreachable objects older than one hour |
+| `gc` | `gc [--now]` | Remove unreachable objects older than one hour; `--now` drops the grace period and collects them all |
+| `prune` | `prune <ref> <keep-count>` | Drop all but the last `keep-count` entries from a ref's log |
 | `pack` | `pack [-z]` | Pack loose objects into `pack.dat`; `-z` compresses |
 | `import-pack` | `import-pack [-z] <pack-file> [<ref> <root-hash>]` | Merge a downloaded bundle (packfile) into this depot, deduplicated; optionally pin a ref to its root |
 
@@ -224,6 +225,20 @@ binary or already-compressed content untouched, so a run of `gc` +
 ```sh
 castool gc
 castool pack -z
+```
+
+Every entry in a ref's log keeps its snapshot reachable, so on a
+mutation-heavy ref `gc` alone reclaims nothing: committed history is
+retained forever. To bound that growth, `prune` a ref to its last N
+snapshots first, then `gc` reclaims the objects the dropped snapshots
+alone held. The newest entry is always kept, so the live tree is never
+at risk. A pruned ref becomes sparse (its log may name objects the depot
+no longer stores); `gc` treats those as boundaries rather than errors,
+while `fsck` still verifies the live root of every ref.
+
+```sh
+castool prune main 100
+castool gc --now
 ```
 
 `pack -z` compresses with the bundled DEFLATE codec, so `castool` must

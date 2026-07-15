@@ -843,11 +843,17 @@ gc_reporter(const char *hash, void *ctx)
 static int
 cmd_gc(struct cas_tree *ct, int argc, char **argv)
 {
-	(void)argc;
-	(void)argv;
+	time_t grace = 3600;
+
+	if (argc >= 1 && strcmp(argv[0], "--now") == 0) {
+		grace = 0;
+	} else if (argc >= 1) {
+		fprintf(stderr, "usage: %s gc [--now]\n", progname);
+		return 1;
+	}
 
 	int removed = 0;
-	int rc = cas_tree_gc(ct, 3600, gc_reporter, NULL, &removed);
+	int rc = cas_tree_gc(ct, grace, gc_reporter, NULL, &removed);
 
 	if (rc != CAS_OK) {
 		fprintf(stderr, "%s: gc failed\n", progname);
@@ -855,6 +861,44 @@ cmd_gc(struct cas_tree *ct, int argc, char **argv)
 	}
 	fprintf(stderr, "removed %d object%s\n", removed,
 	        removed == 1 ? "" : "s");
+	return 0;
+}
+
+/****************************************************************
+ * prune
+ ****************************************************************/
+
+static int
+cmd_prune(struct cas_tree *ct, int argc, char **argv)
+{
+	if (argc < 2) {
+		fprintf(stderr,
+		        "usage: %s prune <ref> <keep-count>\n", progname);
+		return 1;
+	}
+
+	int keep = atoi(argv[1]);
+
+	if (keep < 1) {
+		fprintf(stderr, "%s: keep-count must be at least 1\n",
+		        progname);
+		return 1;
+	}
+
+	int removed = 0;
+	int rc = cas_tree_log_truncate(ct, argv[0], keep, 0, &removed);
+
+	if (rc == CAS_ENOTFOUND) {
+		fprintf(stderr, "%s: ref '%s' has no log\n",
+		        progname, argv[0]);
+		return 1;
+	}
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: prune failed\n", progname);
+		return 1;
+	}
+	fprintf(stderr, "pruned %d log entr%s\n", removed,
+	        removed == 1 ? "y" : "ies");
 	return 0;
 }
 
@@ -1005,7 +1049,8 @@ static const struct command commands[] = {
 	{ "rm",     cmd_rm,     "rm <ref> <name>..." },
 	{ "hash",   cmd_hash,   "hash [file]" },
 	{ "fsck",   cmd_fsck,   "fsck" },
-	{ "gc",     cmd_gc,     "gc" },
+	{ "gc",     cmd_gc,     "gc [--now]" },
+	{ "prune",  cmd_prune,  "prune <ref> <keep-count>" },
 	{ "pack",   cmd_pack,   "pack [-z] loose objects (-z compresses)" },
 	{ "import-pack", cmd_import_pack,
 	  "import-pack [-z] <pack-file> [<ref> <root-hash>]" },

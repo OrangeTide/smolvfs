@@ -117,6 +117,27 @@ int
 cas_tree_log_read(struct cas_tree *ct, const char *name,
                   cas_tree_log_fn fn, void *ctx);
 
+/** Prune a ref's snapshot log, bounding depot growth for a
+ *  mutation-heavy ref.  An entry survives if it is among the last
+ *  keep_count entries (when keep_count > 0) OR its commit time is at
+ *  least keep_since (when keep_since > 0); the two bounds form a union.
+ *  The newest entry is always kept: it is the ref's current root, and a
+ *  live tree is protected from GC only by its log entries.  The log is
+ *  rewritten atomically and fsynced under the ref lock.
+ *
+ *  Pruned entries are removed outright, so the objects they alone
+ *  reached become collectable by a subsequent cas_tree_gc (whose mark
+ *  phase now tolerates the resulting missing objects).
+ *
+ *  Sets *removed to the count of dropped entries (if non-NULL).
+ *  Returns CAS_OK on success, CAS_ENOTFOUND if the ref has no log,
+ *  CAS_ERR on a bad name or if both bounds are unset (which would keep
+ *  nothing), or CAS_EIO on I/O failure.
+ */
+int
+cas_tree_log_truncate(struct cas_tree *ct, const char *name,
+                      int keep_count, time_t keep_since, int *removed);
+
 /****************************************************************
  * Fsck
  ****************************************************************/

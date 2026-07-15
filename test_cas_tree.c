@@ -811,6 +811,286 @@ test_gc_grace_period(void)
 }
 
 /****************************************************************
+ * Log truncation and sparse-tolerant GC
+ ****************************************************************/
+
+/* Commit a snapshot whose root tree holds one file "f" -> blob(content).
+ * Returns the tree and blob hashes through tree_out / blob_out. */
+static void
+commit_file_snapshot(struct cas_tree *ct, struct cas *store,
+                     const char *ref, const char *content,
+                     const char *comment, char *tree_out,
+                     char *blob_out)
+{
+    ASSERT_INT_EQ(cas_put(store, content, strlen(content), blob_out),
+                  CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = { .mode = 0100644 };
+
+    memcpy(e.hash, blob_out, CAS_HASH_HEX + 1);
+    strcpy(e.name, "f");
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, tree_out), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_ref_commit(ct, ref, tree_out, comment),
+                  CAS_OK);
+    cas_tree_dir_free(&dir);
+}
+
+static void
+test_log_truncate_count(void)
+{
+    struct cas *store = make_store("trunc_count");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    char tree[5][CAS_HASH_HEX + 1];
+    char blob[5][CAS_HASH_HEX + 1];
+    const char *content[5] = { "snap0", "snap1", "snap2",
+                               "snap3", "snap4" };
+    const char *comment[5] = { "v0", "v1", "v2", "v3", "v4" };
+
+    for (int i = 0; i < 5; i++)
+        commit_file_snapshot(ct, store, "main", content[i],
+                             comment[i], tree[i], blob[i]);
+
+    /* Invalid: no bound set would keep nothing. */
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "main", 0, 0, NULL),
+                  CAS_ERR);
+    /* Invalid: bad ref name. */
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "a/b", 3, 0, NULL),
+                  CAS_ERR);
+    /* No log for an unknown ref. */
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "other", 3, 0, NULL),
+                  CAS_ENOTFOUND);
+
+    /* Keeping more than exist is a no-op. */
+    int removed = -1;
+
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "main", 10, 0, &removed),
+                  CAS_OK);
+    ASSERT_INT_EQ(removed, 0);
+
+    log_count = 0;
+    ASSERT_INT_EQ(cas_tree_log_read(ct, "main", log_cb, NULL), CAS_OK);
+    ASSERT_INT_EQ(log_count, 5);
+
+    /* Keep the last 2 entries. */
+    removed = -1;
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "main", 2, 0, &removed),
+                  CAS_OK);
+    ASSERT_INT_EQ(removed, 3);
+
+    log_count = 0;
+    ASSERT_INT_EQ(cas_tree_log_read(ct, "main", log_cb, NULL), CAS_OK);
+    ASSERT_INT_EQ(log_count, 2);
+    ASSERT_STR_EQ(log_entries[0].hash, tree[3]);
+    ASSERT_STR_EQ(log_entries[0].comment, "v3");
+    ASSERT_STR_EQ(log_entries[1].hash, tree[4]);
+    ASSERT_STR_EQ(log_entries[1].comment, "v4");
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_log_truncate_keeps_newest(void)
+{
+    struct cas *store = make_store("trunc_newest");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    char tree[3][CAS_HASH_HEX + 1];
+    char blob[3][CAS_HASH_HEX + 1];
+
+    commit_file_snapshot(ct, store, "main", "a", "v0", tree[0],
+                         blob[0]);
+    commit_file_snapshot(ct, store, "main", "b", "v1", tree[1],
+                         blob[1]);
+    commit_file_snapshot(ct, store, "main", "c", "v2", tree[2],
+                         blob[2]);
+
+    /* An age cutoff far in the future would drop every entry, but the
+     * newest must survive so GC still protects the live root. */
+    int removed = -1;
+
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "main", 0,
+                                        (time_t)4102444800LL, &removed),
+                  CAS_OK);
+    ASSERT_INT_EQ(removed, 2);
+
+    log_count = 0;
+    ASSERT_INT_EQ(cas_tree_log_read(ct, "main", log_cb, NULL), CAS_OK);
+    ASSERT_INT_EQ(log_count, 1);
+    ASSERT_STR_EQ(log_entries[0].hash, tree[2]);
+
+    /* GC must not sweep the live world after this. */
+    int gc_removed = 0;
+
+    ASSERT_INT_EQ(cas_tree_gc(ct, 0, NULL, NULL, &gc_removed), CAS_OK);
+    ASSERT(cas_exists(store, tree[2]));
+    ASSERT(cas_exists(store, blob[2]));
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_prune_gc_reclaims(void)
+{
+    struct cas *store = make_store("prune_gc");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    char tree[5][CAS_HASH_HEX + 1];
+    char blob[5][CAS_HASH_HEX + 1];
+    const char *content[5] = { "e0", "e1", "e2", "e3", "e4" };
+
+    for (int i = 0; i < 5; i++)
+        commit_file_snapshot(ct, store, "main", content[i], "v",
+                             tree[i], blob[i]);
+
+    int removed = 0;
+
+    ASSERT_INT_EQ(cas_tree_log_truncate(ct, "main", 2, 0, &removed),
+                  CAS_OK);
+    ASSERT_INT_EQ(removed, 3);
+
+    /* GC over the pruned depot: the mark phase never trips over the
+     * now-unreferenced old objects, and the sweep reclaims them. */
+    int gc_removed = 0;
+
+    ASSERT_INT_EQ(cas_tree_gc(ct, 0, NULL, NULL, &gc_removed), CAS_OK);
+    ASSERT_INT_EQ(gc_removed, 6);
+
+    for (int i = 0; i < 3; i++) {
+        ASSERT(!cas_exists(store, tree[i]));
+        ASSERT(!cas_exists(store, blob[i]));
+    }
+    for (int i = 3; i < 5; i++) {
+        ASSERT(cas_exists(store, tree[i]));
+        ASSERT(cas_exists(store, blob[i]));
+    }
+
+    /* The two surviving snapshots still walk fully. */
+    for (int i = 3; i < 5; i++) {
+        struct cas_tree_dir d;
+
+        ASSERT_INT_EQ(cas_tree_load(ct, tree[i], &d), CAS_OK);
+        ASSERT_INT_EQ(d.count, 1);
+        ASSERT(cas_exists(store, d.entries[0].hash));
+        cas_tree_dir_free(&d);
+    }
+
+    /* fsck walks the live root only and stays clean after pruning. */
+    ASSERT_INT_EQ(cas_tree_fsck(ct, NULL, NULL), CAS_OK);
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_gc_sparse_boundary(void)
+{
+    struct cas *store = make_store("gc_sparse");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    /* leaf blob */
+    char leaf[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "leaf", 4, leaf), CAS_OK);
+
+    /* subdirectory tree holding the leaf */
+    struct cas_tree_dir sub;
+
+    cas_tree_dir_init(&sub);
+
+    struct cas_tree_entry fe = { .mode = 0100644 };
+
+    memcpy(fe.hash, leaf, CAS_HASH_HEX + 1);
+    strcpy(fe.name, "leaf");
+    ASSERT_INT_EQ(cas_tree_dir_add(&sub, &fe), CAS_OK);
+
+    char sub_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &sub, sub_hash), CAS_OK);
+    cas_tree_dir_free(&sub);
+
+    /* root tree referencing the subdirectory */
+    struct cas_tree_dir root;
+
+    cas_tree_dir_init(&root);
+
+    struct cas_tree_entry de = { .mode = 0040000 };
+
+    memcpy(de.hash, sub_hash, CAS_HASH_HEX + 1);
+    strcpy(de.name, "d");
+    ASSERT_INT_EQ(cas_tree_dir_add(&root, &de), CAS_OK);
+
+    char root_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &root, root_hash), CAS_OK);
+    cas_tree_dir_free(&root);
+
+    ASSERT_INT_EQ(cas_tree_ref_commit(ct, "main", root_hash, "v"),
+                  CAS_OK);
+
+    /* Manually prune the subtree object: the ref now references content
+     * the depot no longer stores, a sparse reference. */
+    ASSERT_INT_EQ(cas_remove(store, sub_hash), CAS_OK);
+    ASSERT(!cas_exists(store, sub_hash));
+
+    /* GC must treat the missing subtree as a boundary, not an error. */
+    int removed = 0;
+
+    ASSERT_INT_EQ(cas_tree_gc(ct, 0, NULL, NULL, &removed), CAS_OK);
+    ASSERT(cas_exists(store, root_hash));
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_gc_corruption_still_errors(void)
+{
+    struct cas *store = make_store("gc_corrupt");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    /* a blob object */
+    char blob[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, blob), CAS_OK);
+
+    /* root tree with a directory entry pointing at the blob: a type
+     * mismatch, which is corruption rather than a sparse boundary. */
+    struct cas_tree_dir root;
+
+    cas_tree_dir_init(&root);
+
+    struct cas_tree_entry de = { .mode = 0040000 };
+
+    memcpy(de.hash, blob, CAS_HASH_HEX + 1);
+    strcpy(de.name, "d");
+    ASSERT_INT_EQ(cas_tree_dir_add(&root, &de), CAS_OK);
+
+    char root_hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &root, root_hash), CAS_OK);
+    cas_tree_dir_free(&root);
+
+    ASSERT_INT_EQ(cas_tree_ref_commit(ct, "main", root_hash, "v"),
+                  CAS_OK);
+
+    /* The mark phase must still abort on a real error. */
+    int removed = 0;
+
+    ASSERT_INT_EQ(cas_tree_gc(ct, 0, NULL, NULL, &removed), CAS_ETYPE);
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Ref name validation
  ****************************************************************/
 
@@ -1496,6 +1776,11 @@ main(void)
     RUN(test_gc_preserves_history);
     RUN(test_gc_empty);
     RUN(test_gc_grace_period);
+    RUN(test_log_truncate_count);
+    RUN(test_log_truncate_keeps_newest);
+    RUN(test_prune_gc_reclaims);
+    RUN(test_gc_sparse_boundary);
+    RUN(test_gc_corruption_still_errors);
     RUN(test_ref_invalid_name);
     RUN(test_ref_invalid_hash);
     RUN(test_log_truncated);
