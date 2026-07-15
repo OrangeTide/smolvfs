@@ -832,10 +832,19 @@ cas_put_object(struct cas *store, const char *type,
 
     close(fd);
 
+    /* Atomically move temp file to final location.
+     * If rename fails (rare on local filesystems, possible on NFS),
+     * check if the target already exists. This handles dedup: if another
+     * process wrote the same hash before our rename completed, the target
+     * file is already there. With the depot lock held (Item 2), only
+     * external processes can create races; internal concurrent access is
+     * serialized. Treat target existence as a dedup success.
+     */
     if (rename(tmp, path) != 0) {
         unlink(tmp);
         if (access(path, F_OK) != 0)
             return CAS_EIO;
+        /* Target exists: dedup success, fall through */
     }
 
     memcpy(hash_out, hash, CAS_HASH_HEX + 1);
@@ -914,10 +923,14 @@ cas_put_object_at(struct cas *store, const char *type,
 
     close(fd);
 
+    /* Atomically move temp file to final location.
+     * See cas_put_object for dedup logic and TOCTOU analysis.
+     */
     if (rename(tmp, path) != 0) {
         unlink(tmp);
         if (access(path, F_OK) != 0)
             return CAS_EIO;
+        /* Target exists: dedup success, fall through */
     }
 
     return CAS_OK;
@@ -1000,10 +1013,14 @@ cas_put_precompressed(struct cas *store, const char *type, int codec,
 
     close(fd);
 
+    /* Atomically move temp file to final location.
+     * See cas_put_object for dedup logic and TOCTOU analysis.
+     */
     if (rename(tmp, path) != 0) {
         unlink(tmp);
         if (access(path, F_OK) != 0)
             return CAS_EIO;
+        /* Target exists: dedup success, fall through */
     }
 
     return CAS_OK;
