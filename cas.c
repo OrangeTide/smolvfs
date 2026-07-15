@@ -1134,8 +1134,15 @@ cas_foreach(struct cas *store, cas_foreach_fn fn, void *ctx)
 {
     DIR *top = opendir(store->basedir);
 
-    if (!top)
-        return CAS_OK;
+    if (!top) {
+        /* Distinguish between "directory not found" (OK for new depot)
+         * and other errors (permission, I/O, etc., which should be
+         * reported so callers can detect corruption/access issues).
+         */
+        if (errno == ENOENT)
+            return CAS_OK;  /* Depot dir not created yet; OK */
+        return CAS_EIO;     /* Other error: permission, I/O, etc. */
+    }
 
     struct dirent *bucket;
 
