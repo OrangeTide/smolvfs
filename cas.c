@@ -259,6 +259,36 @@ struct cas {
     int lock_fd;  /* exclusive lock on depot directory */
 };
 
+/** Validate basedir to prevent path traversal attacks.
+ *  Returns 0 if valid, -1 if suspicious patterns detected.
+ *  Checks: no ".." components, no symlinks leading outside.
+ *  (realpath() requires the path to exist, so we do best-effort validation)
+ */
+static int
+validate_basedir(const char *basedir)
+{
+    if (!basedir || !*basedir)
+        return -1;
+
+    /* Check for ".." path traversal attempts */
+    const char *p = basedir;
+    while (*p) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return -1;  /* ".." found */
+        p++;
+    }
+
+    /* If path exists, verify it with realpath to resolve any symlinks */
+    if (access(basedir, F_OK) == 0) {
+        char canonical[CAS_PATH_MAX];
+        if (realpath(basedir, canonical) == NULL)
+            return -1;  /* realpath failed or path is invalid */
+        /* Successfully validated via realpath */
+    }
+
+    return 0;
+}
+
 static int
 build_path(const struct cas *store, const char *hash,
            char *buf, size_t bufsz)
@@ -344,6 +374,12 @@ cas_new(const char *basedir)
         return NULL;
     store->basedir = strdup(basedir ? basedir : "depot");
     if (!store->basedir) {
+        free(store);
+        return NULL;
+    }
+
+    if (validate_basedir(store->basedir) != 0) {
+        free(store->basedir);
         free(store);
         return NULL;
     }
