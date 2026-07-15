@@ -746,13 +746,20 @@ cas_open(struct cas *store, struct cas_file *cf, const char *hash)
 void
 cas_close(struct cas_file *cf)
 {
-    if (cf->_release)
-        cf->_release(cf);
+    /* Save and clear the release function pointer before calling it.
+     * This makes cas_close idempotent: calling it multiple times is safe.
+     * On the second call, _release is NULL, so nothing happens.
+     */
+    void (*release_fn)(struct cas_file *cf) = cf->_release;
+    cf->_release = NULL;
+
+    if (release_fn)
+        release_fn(cf);
+
     cf->data = NULL;
     cf->len = 0;
     cf->_priv = NULL;
     cf->_privlen = 0;
-    cf->_release = NULL;
 }
 
 int
