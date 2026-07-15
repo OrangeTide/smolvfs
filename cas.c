@@ -731,6 +731,12 @@ cas_put_object(struct cas *store, const char *type,
         return rc;
     }
 
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp);
+        return CAS_EIO;
+    }
+
     close(fd);
 
     if (rename(tmp, path) != 0) {
@@ -805,6 +811,12 @@ cas_put_object_at(struct cas *store, const char *type,
         close(fd);
         unlink(tmp);
         return rc;
+    }
+
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp);
+        return CAS_EIO;
     }
 
     close(fd);
@@ -885,6 +897,12 @@ cas_put_precompressed(struct cas *store, const char *type, int codec,
         close(fd);
         unlink(tmp);
         return rc;
+    }
+
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp);
+        return CAS_EIO;
     }
 
     close(fd);
