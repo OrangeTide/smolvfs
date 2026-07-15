@@ -591,12 +591,17 @@ cas_open_object(struct cas *store, struct cas_file *cf,
         return CAS_EIO;
     }
 
-    size_t filesz = (size_t)sb.st_size;
-
-    if (filesz < CAS_PACK_BLOCK) {
+    /* Validate file size before casting and mmapping.
+     * st_size is signed (off_t); a negative value indicates corruption.
+     * Also enforce an upper bound (1GB) to prevent memory exhaustion
+     * and match cas-codec limits.
+     */
+    if (sb.st_size < (off_t)CAS_PACK_BLOCK || sb.st_size > (off_t)(1 << 30)) {
         close(fd);
         return CAS_ERR;
     }
+
+    size_t filesz = (size_t)sb.st_size;
 
     void *ptr = mmap(NULL, filesz, PROT_READ, MAP_PRIVATE, fd, 0);
 
@@ -692,12 +697,17 @@ cas_open_loose_raw(struct cas *store, struct cas_file *cf,
         return CAS_EIO;
     }
 
-    size_t filesz = (size_t)sb.st_size;
-
-    if (filesz < CAS_PACK_BLOCK) {
+    /* Validate file size before casting and mmapping.
+     * st_size is signed (off_t); a negative value indicates corruption.
+     * Also enforce an upper bound (1GB) to prevent memory exhaustion
+     * and match cas-codec limits.
+     */
+    if (sb.st_size < (off_t)CAS_PACK_BLOCK || sb.st_size > (off_t)(1 << 30)) {
         close(fd);
         return CAS_ERR;
     }
+
+    size_t filesz = (size_t)sb.st_size;
 
     void *ptr = mmap(NULL, filesz, PROT_READ, MAP_PRIVATE, fd, 0);
 
