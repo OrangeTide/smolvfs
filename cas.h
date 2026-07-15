@@ -91,6 +91,43 @@ const char *
 cas_log_strerror(int code);
 
 /****************************************************************
+ * Compression Policy (optional, defaults apply if not set)
+ ****************************************************************/
+
+/** Compression policy configuration.
+ *  Controls whether and when cas_put_object_z() compresses objects.
+ *  All fields optional; use 0 for defaults.
+ */
+struct cas_compress_config {
+    /** Enable compression (1 = yes, 0 = disable all compression) */
+    int enabled;
+
+    /** Minimum object size to attempt compression, in bytes (0 = default 512).
+     *  Very small objects add more codec overhead than they save.
+     */
+    size_t min_size;
+
+    /** Minimum savings to keep compressed form, as percentage (0 = default 12).
+     *  If compressed size + tag does not save at least this percentage of
+     *  plaintext, store the raw form instead. Range: 1-99.
+     */
+    int min_savings_pct;
+};
+
+/** Set global compression policy. Returns CAS_OK on success.
+ *  All fields in cfg are copied; caller retains ownership.
+ *  Set cfg to NULL to use hard-coded defaults (512B minimum, 12% savings).
+ */
+int
+cas_compression_config(const struct cas_compress_config *cfg);
+
+/** Reset compression policy to hard-coded defaults.
+ *  Equivalent to cas_compression_config(NULL).
+ */
+void
+cas_compression_reset(void);
+
+/****************************************************************
  * Data structures
  ****************************************************************/
 

@@ -142,6 +142,40 @@ cas__log_emit(int code, const char *file, int line, const char *msg)
     cas__log_emit(code, __FILE__, __LINE__, msg)
 
 /****************************************************************
+ * Compression Policy (global configuration)
+ ****************************************************************/
+
+static struct cas_compress_config cas__compress_cfg = {
+    .enabled = 1,
+    .min_size = 512,        /* default: skip codec overhead on tiny objects */
+    .min_savings_pct = 12,  /* default: require >12% savings to justify codec cost */
+};
+
+int
+cas_compression_config(const struct cas_compress_config *cfg)
+{
+    if (!cfg)
+        return CAS_ERR;
+
+    /* Validate min_savings_pct range. */
+    if (cfg->min_savings_pct < 1 || cfg->min_savings_pct > 99)
+        return CAS_ERR;
+
+    cas__compress_cfg = *cfg;
+    return CAS_OK;
+}
+
+void
+cas_compression_reset(void)
+{
+    cas__compress_cfg = (struct cas_compress_config){
+        .enabled = 1,
+        .min_size = 512,
+        .min_savings_pct = 12,
+    };
+}
+
+/****************************************************************
  * BLAKE2b-256 (RFC 7693)
  ****************************************************************/
 
@@ -1223,17 +1257,14 @@ cas_put_object_z(struct cas *store, const char *type, int codec,
         return CAS_OK;
     }
 
-    /* Try to compress; keep the compressed form only if the savings
-     * justify the codec overhead. For very small objects, compression
-     * adds more overhead (frame, header) than it saves, so skip for
-     * objects < 512 bytes. For larger objects, require >12% savings.
-     * The threshold plen + 1 < len - len/8 ensures:
-     *   - Compressed payload + codec tag < 87.5% of original
-     *   - Typical codecs (gzip, zstd) achieve >12% on most data
+    /* Try to compress if enabled and object is large enough.
+     * Keep compressed form only if savings justify codec overhead.
+     * The savings threshold is configurable via cas_compression_config().
      * Already-compressed data (e.g., JPEG) is not re-compressed,
      * so codec attempt is a sunk cost; keep result only if it wins.
      */
-    if (codec != CAS_CODEC_NONE && len >= 512 &&
+    if (cas__compress_cfg.enabled && codec != CAS_CODEC_NONE &&
+        len >= cas__compress_cfg.min_size &&
         cas_codec_can_encode(codec)) {
         unsigned char *buf = malloc(len);
 
@@ -1241,7 +1272,13 @@ cas_put_object_z(struct cas *store, const char *type, int codec,
             size_t plen = len;
             int rc = cas_codec_encode(codec, data, len, buf, &plen);
 
-            if (rc == CAS_OK && plen + 1 < len - len / 8) {
+            /* Calculate minimum savings required (in bytes).
+             * Example: 1000B object, 12% savings = 120B savings required
+             * So compressed must be < 1000 - 120 = 880 bytes (plus 1 byte for codec tag)
+             */
+            size_t min_savings = len * (size_t)cas__compress_cfg.min_savings_pct / 100;
+
+            if (rc == CAS_OK && plen + 1 < len - min_savings) {
                 rc = cas_put_precompressed(store, type, codec, buf,
                                            plen, len, hash);
                 free(buf);
