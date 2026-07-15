@@ -571,12 +571,17 @@ fsck_dir(struct vfs *fs, const struct vfs_cred *cred,
 
         if (!found) {
             char path[SNAP_PATH_MAX];
+            int n;
 
             if (strcmp(dirpath, "/") == 0)
-                snprintf(path, sizeof(path), "/%s", name);
+                n = snprintf(path, sizeof(path), "/%s", name);
             else
-                snprintf(path, sizeof(path), "%s/%s",
-                         dirpath, name);
+                n = snprintf(path, sizeof(path), "%s/%s",
+                             dirpath, name);
+            /* VFS paths are bounded, so this cannot truncate in
+             * practice; skip rather than report a mangled path. */
+            if (n < 0 || (size_t)n >= sizeof(path))
+                continue;
             (*errors)++;
             if (fn && fn(path, VFS_SNAP_FSCK_ADDED, ctx)) {
                 cas_tree_dir_free(&dir);

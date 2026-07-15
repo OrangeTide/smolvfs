@@ -311,7 +311,7 @@ test_fsck_corrupt(void)
     ASSERT_INT_EQ(cas_put(store, "good data", 9, hash), CAS_OK);
 
     /* corrupt the file by appending a byte */
-    char path[512];
+    char path[sizeof(depot) + CAS_HASH_HEX + 8];
     snprintf(path, sizeof(path), "%s/%.2s/%s", depot, hash, hash);
     FILE *fp = fopen(path, "a");
     ASSERT(fp != NULL);
