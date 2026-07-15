@@ -873,6 +873,7 @@ cas_put_object(struct cas *store, const char *type,
     mkdir(store->basedir, 0755);
     mkdir(dir, 0755);
 
+    /* Check that temp filename fits in buffer before mkstemp. */
     if (snprintf(tmp, sizeof(tmp), "%s/.cas.XXXXXX", dir) >=
         (int)sizeof(tmp))
         return CAS_ERR;
@@ -964,6 +965,7 @@ cas_put_object_at(struct cas *store, const char *type,
     mkdir(store->basedir, 0755);
     mkdir(dir, 0755);
 
+    /* Check that temp filename fits in buffer before mkstemp. */
     if (snprintf(tmp, sizeof(tmp), "%s/.cas.XXXXXX", dir) >=
         (int)sizeof(tmp))
         return CAS_ERR;
@@ -1053,6 +1055,7 @@ cas_put_precompressed(struct cas *store, const char *type, int codec,
     mkdir(store->basedir, 0755);
     mkdir(dir, 0755);
 
+    /* Check that temp filename fits in buffer before mkstemp. */
     if (snprintf(tmp, sizeof(tmp), "%s/.cas.XXXXXX", dir) >=
         (int)sizeof(tmp))
         return CAS_ERR;
