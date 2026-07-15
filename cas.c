@@ -490,7 +490,12 @@ parse_header(const char *hdr, size_t hdrsz,
         size_t prev = len;
 
         len = len * 10 + (size_t)(*d - '0');
-        if (len < prev)
+        /* Detect overflow: wrapped value will be < prev.
+         * Also apply reasonable upper bound (1GB) to reject absurdly
+         * large sizes that can't be allocated or processed.
+         * Note: cas-codec uses 1GB as its default upper limit.
+         */
+        if (len < prev || len > (size_t)1 << 30)
             return CAS_ERR;
     }
 
