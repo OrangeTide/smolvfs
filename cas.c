@@ -247,6 +247,10 @@ blake2b_final(struct blake2b *S, void *out)
 
 static const char hex_chars[] = "0123456789abcdef";
 
+/** Encode binary to hex string.
+ *  Encodes len bytes from bin into out as null-terminated hex string.
+ *  out must be at least len*2+1 bytes.
+ */
 static void
 to_hex(const uint8_t *bin, size_t len, char *out)
 {
@@ -257,6 +261,10 @@ to_hex(const uint8_t *bin, size_t len, char *out)
     out[len * 2] = '\0';
 }
 
+/** Validate hex hash string format.
+ *  Checks that hash is exactly CAS_HASH_HEX characters of valid hex.
+ *  Returns nonzero if valid, 0 if invalid.
+ */
 static int
 valid_hash(const char *hash)
 {
@@ -454,6 +462,10 @@ cas_basedir(struct cas *store)
  * Write / header helpers
  ****************************************************************/
 
+/** Write data to fd, handling partial writes and EINTR.
+ *  Continues until all len bytes are written or an error occurs.
+ *  Returns CAS_OK on success, CAS_EIO on I/O error.
+ */
 static int
 write_full(int fd, const void *data, size_t len)
 {
@@ -590,12 +602,18 @@ cas_hash_object(const char *type, const void *data, size_t len,
  * cas_file teardown
  ****************************************************************/
 
+/** Cleanup for mmap-backed cas_file.
+ *  Unmaps the mmap region. Used as _release callback.
+ */
 static void
 release_munmap(struct cas_file *cf)
 {
     munmap(cf->_priv, cf->_privlen);
 }
 
+/** Cleanup for malloc-backed cas_file.
+ *  Frees the heap buffer. Used as _release callback.
+ */
 static void
 release_free(struct cas_file *cf)
 {
