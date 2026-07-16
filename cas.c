@@ -19,6 +19,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE  /* musl exposes realpath() only under this or _XOPEN_SOURCE */
 
 #include "cas.h"
 #include "cas-pack.h"
