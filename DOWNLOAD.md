@@ -11,6 +11,12 @@ Byte layouts referenced here (objects, trailers, the packfile index and
 footer, tree and htree directories) are specified in
 [FORMAT.md](FORMAT.md); this document does not restate them.
 
+This is also the **HTTP profile of REEF** ([REEF.md](REEF.md)), which
+generalises the same walk to any transport that carries bounded messages.
+The two agree on the primitives (fetch an object, fetch a byte range,
+resolve a ref) and on verification. Where they differ, this document
+governs static hosting and REEF governs everything else.
+
 PUBLIC DOMAIN (CC0-1.0)
 
 ## Goals

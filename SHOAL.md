@@ -28,6 +28,14 @@ on top of it. The two stay cleanly separated: smolvfs owns immutable
 content and local bookkeeping; shoal owns peers, routing, signing, and
 propagation.
 
+The network layer splits into two planes, specified separately. **REEF**
+([REEF.md](REEF.md)) is the content plane: fetch objects and ranges by
+address, pull-driven, cacheable, no session state beyond the current
+walk. **SHOAL**, this document, is the naming and federation plane:
+signed topic heads, subscription, and the domain policy REEF enforces.
+They have opposite characteristics on nearly every axis, which is why
+they are not one protocol.
+
 ## Goals
 
 - Fetch any object by hash, from local storage or a peer, verified.
@@ -320,25 +328,37 @@ argument above that content routing is deferrable, this suggests any
 future routing layer should carry the public domain only, with restricted
 domains served through authenticated peers and direct hints.
 
-### D14. Distributed authentication as a server-domain topic
+### D14. Shared authentication is out of scope
 
-The federated authentication case fits the topic model directly. A user's
-home server is the single writer of that user's record, published as a
-server-domain topic under its own id. Ownership of the record is the
-authority, which is what D2 already provides: the topic name binds to the
-key permitted to write it, so a peer verifies a user record without
+Federated authentication looked like a natural fit for the topic model. A
+user's home server is the single writer of that user's record, ownership
+of the record is the authority, and D2 already binds a topic name to the
+key permitted to write it, so a peer could verify a user record without
 consulting a registry.
 
-Delegations, meaning tokens granting a bearer some capability, are signed
-entries in the version chain (D3). Revocation is a later record with a
-higher `seq`, and monotonicity means a peer cannot be convinced to accept
-a superseded record it has already seen.
+**It is nonetheless out of scope for shoal and REEF.** Servers own their
+authentication records locally, and a user in a federation is authorized
+by their home server through whatever means that server prefers. Nothing
+about credentials rides these protocols.
 
-The weakness is propagation. A peer that has not fetched the latest
-record does not know a delegation was revoked, so delegations need short
-expiry with the chain as the authority for the durable record. This is
-the same trade every token system makes, and it is recorded in Open
-questions.
+The reasons are worth recording, because the fit is tempting enough that
+it will be proposed again:
+
+- A bearer credential in an immutable, deduplicating store with no
+  retraction story (see Open questions) is a liability. Revocation would
+  have to be a later record with a higher `seq`, so a peer that has not
+  fetched the latest record keeps honouring a revoked delegation.
+  Bounding that window means short expiry, at which point the chain is
+  carrying something that expires faster than it propagates.
+- The disclosure rules of D13 exist precisely because low-entropy records
+  are enumerable by address. User records are the worst case for this,
+  and putting them in the store means the strictest possible domain
+  policy has to be right on every path.
+- The federation this design targets is a set of player-run shards of one
+  game. Home-server authorization needs no shared record at all.
+
+What remains in the server domain is ordinary federation state, not
+credentials.
 
 ### Enforcement is not smolvfs's job
 
@@ -512,10 +532,6 @@ problems.
 - **Manifest shape in v1.** Include per-chunk lengths for ranged reads
   from the start (cheap now, hard to retrofit); single-level vs
   multi-level threshold.
-- **Delegation revocation latency.** A peer that has not fetched the
-  latest record in a user's chain (D14) does not know a delegation was
-  revoked. Short expiry bounds the window, but the right expiry and
-  whether revocations warrant a push are undecided.
 - **Promoting content between domains.** Publishing an asset from client
   to public is a copy under D12. Whether that copy is explicit, whether
   it is reversible, and what happens to content already disclosed under
