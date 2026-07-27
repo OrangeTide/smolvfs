@@ -38,6 +38,9 @@ propagation.
   scripts) efficiently, with dedup across versions and variants.
 - Lazy / partial fetch: hold an index (a tree) of content you do not
   have, and fetch on demand.
+- Control disclosure: classify content so that private state, federation
+  state, and client-visible state are not served to the wrong audience
+  (see Data domains).
 
 ## Non-goals (for now)
 
@@ -65,6 +68,7 @@ propagation.
   ------------------------------------------------
   shoal network layer
     - peer transport, membership, K-closest routing
+    - peer authentication and domain policy (which depot answers)
     - signing / verification of topic heads
     - fetch orchestration (provider hints, chunk swarming)
     - chunking (content-defined) and file reassembly
@@ -72,7 +76,7 @@ propagation.
   smolvfs
     - content-addressed objects (immutable, self-verifying)
     - trees / htrees, refs (local head + history), packs
-    - local gc
+    - one depot per domain; local gc
 ```
 
 A key invariant of the layering: the **content address** is smolvfs's
@@ -234,6 +238,117 @@ them, even when it holds only part of a root's graph. This needs:
   before non-container content) so reachability is always computable and
   a child rarely arrives before its parent.
 
+### D11. Four domains, totally ordered
+
+Every decision above assumes content that may be shared with whoever
+asks. That assumption does not survive contact with a real deployment,
+which holds session caches, credentials, user records, and player state
+alongside shareable assets. Domains are the disclosure classification
+that decides what shoal may serve to whom.
+
+- **local** -- private to this server. Caches, session state,
+  credentials, anything with no meaning elsewhere. Never served.
+- **server** -- shared with trusted servers in the federation. Minimal
+  user records supporting optional distributed authentication.
+- **client** -- shared with authenticated clients and with trusted
+  servers.
+- **public** -- shareable with anyone. No current use case, but naming it
+  keeps the ordering complete.
+
+Because the client domain is defined to include trusted servers, the four
+form a chain rather than a lattice:
+
+```
+  local  <  server  <  client  <  public
+```
+
+A total order matters. It makes "more permissive" well defined, which in
+turn makes the enforcement rule in D12 a single comparison rather than a
+policy evaluation.
+
+### D12. Domains attach to roots, and depots enforce them
+
+A content address is a function of the bytes alone, so **an object cannot
+carry a domain**. Identical bytes produce one address no matter which
+domain wrote them. The classification therefore attaches to a **ref or
+topic**, and its reachable closure inherits it.
+
+Enforce this by giving each domain **its own depot**, rather than
+labelling objects inside one depot:
+
+- Which depot answered a request is a static, auditable fact. Deriving a
+  domain from graph reachability is a computation performed on every
+  serve decision, and one that gives ambiguous answers when an object is
+  reachable from roots in two domains.
+- Cross-domain dedup is itself a disclosure channel. When a write to a
+  shared depot silently succeeds as a dedup hit, the writer learns that
+  someone else already stored those bytes. Separate depots remove the
+  channel rather than mitigating it.
+- The depot lock is per depot, so separation also relieves the
+  single-lock constraint noted in the comparison above.
+
+The cost is duplicated bytes for content that legitimately belongs to
+more than one domain, which is mostly shareable assets referenced by
+restricted data. The resolver from the previous section absorbs this: a
+lookup that misses in a restricted depot may fall through to a more
+permissive one.
+
+**The enforcement rule is that resolution flows toward permissiveness and
+never back.** A client-domain request may be answered from the client or
+public depot. A public request is never answered from the server or local
+depot. One comparison against the D11 order, applied at the point where
+the peer's authenticated role selects the starting depot.
+
+### D13. Never answer a bare hash outside the public domain
+
+Content addressing lets anyone who possesses the plaintext compute its
+address. For low-entropy content such as a user record with a known
+schema and a guessable identifier, an attacker can construct candidate
+records, compute their addresses, and ask whether the server holds them.
+A serve path that answers "does this hash exist" confirms the guess, and
+enumeration follows.
+
+So restricted domains do not expose `get(hash)`. A request names a
+**topic the requester is authorized to subscribe to**, and the server
+answers only for objects within that topic's closure. Possession of an
+address grants nothing on its own. The public domain, having nothing to
+confirm, may answer bare addresses freely.
+
+The provider index of D8 needs the same treatment: "node N holds hash X"
+is a disclosure, so provider indexes are per domain. Combined with the
+argument above that content routing is deferrable, this suggests any
+future routing layer should carry the public domain only, with restricted
+domains served through authenticated peers and direct hints.
+
+### D14. Distributed authentication as a server-domain topic
+
+The federated authentication case fits the topic model directly. A user's
+home server is the single writer of that user's record, published as a
+server-domain topic under its own id. Ownership of the record is the
+authority, which is what D2 already provides: the topic name binds to the
+key permitted to write it, so a peer verifies a user record without
+consulting a registry.
+
+Delegations, meaning tokens granting a bearer some capability, are signed
+entries in the version chain (D3). Revocation is a later record with a
+higher `seq`, and monotonicity means a peer cannot be convinced to accept
+a superseded record it has already seen.
+
+The weakness is propagation. A peer that has not fetched the latest
+record does not know a delegation was revoked, so delegations need short
+expiry with the chain as the authority for the durable record. This is
+the same trade every token system makes, and it is recorded in Open
+questions.
+
+### Enforcement is not smolvfs's job
+
+smolvfs stores bytes and has no notion of a requester. The boundary is
+enforced entirely by which depot a request resolves against and by the
+peer authentication that selects it. A domain recorded in a file is
+documentation, not a control. The local domain in particular is protected
+by never publishing it, not by a flag, because a static origin has no
+logic with which to honour one.
+
 ## Required smolvfs changes
 
 Most of shoal is above smolvfs. The base needs:
@@ -245,9 +360,15 @@ Most of shoal is above smolvfs. The base needs:
   import / pack as a re-encoded type.
 - Confirm `valid_ref_name` accepts `server-id/topic` (a `/` in the name)
   or define an encoding.
+- Per-domain depots (D12) mean a process holds several `struct cas` at
+  once. Each takes its own depot lock, which is already supported, but
+  the resolver needs a defined order and a fall-through rule.
+- A miss in one depot must be answerable from another without copying
+  the object back, or with an explicit promote step. Decide which.
 
 Chunking (content-defined split + manifest build/reassembly), signing,
-and all networking live in the shoal layer, not in smolvfs.
+domain policy, and all networking live in the shoal layer, not in
+smolvfs.
 
 ## What smolvfs already provides
 
@@ -391,6 +512,19 @@ problems.
 - **Manifest shape in v1.** Include per-chunk lengths for ranged reads
   from the start (cheap now, hard to retrofit); single-level vs
   multi-level threshold.
+- **Delegation revocation latency.** A peer that has not fetched the
+  latest record in a user's chain (D14) does not know a delegation was
+  revoked. Short expiry bounds the window, but the right expiry and
+  whether revocations warrant a push are undecided.
+- **Promoting content between domains.** Publishing an asset from client
+  to public is a copy under D12. Whether that copy is explicit, whether
+  it is reversible, and what happens to content already disclosed under
+  the wider domain all need answers.
+- **Domain of a chunk.** A chunked manifest in a restricted domain
+  references chunks that may be identical to public ones. Deduplicating
+  across that boundary reintroduces the confirmation attack of D13, so
+  the safe default is not to, at the cost of storing popular chunks
+  twice.
 
 ## Prior art referenced
 

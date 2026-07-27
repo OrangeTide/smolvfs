@@ -61,6 +61,51 @@ objects, packs:  Cache-Control: public, max-age=31536000, immutable
 refs:            Cache-Control: no-cache        (validate with ETag)
 ```
 
+## Domains
+
+The cache policy above assumes every published object may be handed to
+anyone who asks. A deployment that also holds private state needs the
+disclosure classification described in
+[SHOAL.md](SHOAL.md) under Data domains: `local`, `server`, `client`, and
+`public`, ordered from least to most permissive.
+
+This protocol carries none of that classification in the data. A domain
+is a property of a depot, so:
+
+- **One base URL per domain.** A published depot is single-domain, and
+  access control lives at the origin for that base URL. The public domain
+  is anonymous, the client domain requires client authentication, and the
+  server domain requires a federation credential.
+- **The local domain is never published.** It is protected by not
+  serving it, not by a marker in a file. Static hosting has no logic with
+  which to honour a marker.
+- **A pack must not span domains.** The pack transport works by byte
+  range, so any client able to read one object in a pack can read every
+  object in it. Mixing domains inside a pack defeats the origin's access
+  control entirely. The same applies to bundles.
+- **Restricted domains must not be cached by shared caches.**
+  `Cache-Control: public` on a client-domain or server-domain depot lets
+  an intermediary serve that content to a different audience. Use
+  `private` there, and reserve the immutable shared-cache policy above
+  for the public domain.
+- **Disable directory listing on `refs/`.** A listable ref directory
+  enumerates the topics a server publishes even when the roots themselves
+  are unreadable.
+
+There is a limit worth stating plainly. This protocol answers a request
+for a bare address, which is what makes static hosting sufficient. An
+attacker holding a candidate plaintext can compute its address and ask
+whether the origin has it, turning a guess into a confirmation. For
+high-entropy content this is not reachable. For low-entropy content, such
+as a record with a known schema and a guessable identifier, it is, and
+that content should be served through an authenticated endpoint scoped to
+a topic the requester may subscribe to rather than published as static
+files. That is D13 in SHOAL.md.
+
+Access control is a confidentiality measure only. Object integrity comes
+from content addressing and does not change, so a restricted depot is no
+more trusted than a public one (see Trust).
+
 ## The core idea
 
 A client updating to a snapshot walks the snapshot's tree from its root
