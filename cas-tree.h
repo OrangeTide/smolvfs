@@ -171,6 +171,24 @@ int
 cas_tree_fsck_root(struct cas_tree *ct, const char *root_hash,
                    cas_tree_fsck_fn fn, void *ctx);
 
+/** Verify one directory object against the address it is stored under,
+ *  without descending into it.  Returns a CAS_FSCK_* code.
+ *
+ *  This is the verification cas_fsck_object cannot perform: an htree is
+ *  addressed by the canonical text form of the directory it encodes, not
+ *  by its own bytes, so checking it needs the tree layer.  A caller
+ *  accepting an htree from an untrusted source must use this rather than
+ *  the object-level check, which reports CAS_FSCK_REENCODED and defers.
+ *
+ *  A `tree` is delegated to cas_fsck_object.  An htree must both encode
+ *  the entry set whose text form hashes to the address and reproduce its
+ *  own bytes when that entry set is re-encoded; see FORMAT.md,
+ *  "Verifying an htree", for why one check without the other is not
+ *  enough.
+ */
+int
+cas_tree_verify(struct cas_tree *ct, const char *hash);
+
 /****************************************************************
  * Garbage collection
  ****************************************************************/

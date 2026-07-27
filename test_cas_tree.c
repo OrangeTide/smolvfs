@@ -1747,6 +1747,190 @@ test_htree_fsck_skips(void)
 }
 
 /****************************************************************
+ * Forged htree: a table slot pointing outside the records region
+ ****************************************************************/
+
+/* Adler-32 per FORMAT.md, reimplemented rather than borrowed from the
+ * library.  A forgery has to carry a correct checksum, or the test would
+ * pass because the checksum failed rather than because the encoding is
+ * pinned, which is the property actually under test. */
+static uint32_t
+t_adler32(const unsigned char *p, size_t n)
+{
+    uint32_t a = 1, b = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        a = (a + p[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+}
+
+static uint32_t
+t_le32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void
+t_store_le32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+/** Find the table slot whose record carries `name`, or 0.
+ *  Scanning every bucket avoids reimplementing the djb hash here.
+ */
+static size_t
+t_find_slot(const unsigned char *d, size_t cdb_len, const char *name)
+{
+    size_t namelen = strlen(name);
+
+    for (int b = 0; b < 256; b++) {
+        uint32_t tpos = t_le32(d + b * 8);
+        uint32_t nslots = t_le32(d + b * 8 + 4);
+
+        for (uint32_t s = 0; s < nslots; s++) {
+            size_t spos = (size_t)tpos + (size_t)s * 8;
+            uint32_t rpos = t_le32(d + spos + 4);
+
+            if (rpos == 0 || (size_t)rpos + 8 + namelen > cdb_len)
+                continue;
+            if (t_le32(d + rpos) != (uint32_t)namelen)
+                continue;
+            if (memcmp(d + rpos + 8, name, namelen) == 0)
+                return spos;
+        }
+    }
+    return 0;
+}
+
+static void
+test_htree_forged_table_pointer(void)
+{
+    struct cas *store = make_store("htree_forge");
+    struct cas_tree *ct = cas_tree_new(store);
+    const char *target = "config.lua";
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char good[CAS_HASH_HEX + 1], evil[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "good", 4, good), CAS_OK);
+    ASSERT_INT_EQ(cas_put(store, "evil", 4, evil), CAS_OK);
+
+    static const char *names[] = { "alpha", "beta", "config.lua", };
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        struct cas_tree_entry e = {
+            .mode = 0100644, .uid = 1, .gid = 2,
+            .mtime_s = 100, .mtime_ns = 0,
+        };
+
+        memcpy(e.hash, good, CAS_HASH_HEX + 1);
+        strcpy(e.name, names[i]);
+        ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    }
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    /* an honest htree verifies */
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_OK);
+
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+
+    ASSERT_INT_EQ(cas_open_object(store, &cf, hash, type, sizeof(type)),
+                  CAS_OK);
+    ASSERT_STR_EQ(type, "htree");
+
+    size_t orig_len = cf.len;
+    size_t namelen = strlen(target);
+    size_t reclen = 8 + namelen + 56;
+    size_t cdb_len = orig_len - 8;
+    size_t forged_len = orig_len + reclen;
+    unsigned char *forged = calloc(1, forged_len);
+
+    ASSERT(forged != NULL);
+    if (!forged) {
+        cas_close(&cf);
+        cas_tree_free(ct);
+        cas_free(store);
+        return;
+    }
+    memcpy(forged, cf.data, cdb_len);
+    cas_close(&cf);
+
+    /* Append a second record for the target naming the evil child, past
+     * the tables where the record scan cannot reach it, and point the
+     * target's slot at it.  htree_parse_dir stops at the lowest table
+     * offset, so a listing still sees the honest record, while
+     * htree_lookup_entry follows the slot to the forged one. */
+    size_t spos = t_find_slot(forged, cdb_len, target);
+
+    ASSERT(spos != 0);
+
+    uint32_t honest = t_le32(forged + spos + 4);
+    size_t rec = cdb_len;
+
+    memcpy(forged + rec, forged + honest, reclen);
+
+    unsigned char evil_bin[CAS_HASH_LEN];
+
+    ASSERT_INT_EQ(cas_hex_decode(evil, CAS_HASH_HEX, evil_bin,
+                                 sizeof(evil_bin)), CAS_OK);
+    memcpy(forged + rec + 8 + namelen + 24, evil_bin, CAS_HASH_LEN);
+    t_store_le32(forged + spos + 4, (uint32_t)rec);
+
+    size_t new_cdb = forged_len - 8;
+
+    t_store_le32(forged + new_cdb, t_adler32(forged, new_cdb));
+    memcpy(forged + new_cdb + 4, "HTv1", 4);
+
+    ASSERT_INT_EQ(cas_remove(store, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_put_object_at(store, "htree", forged, forged_len,
+                                    hash), CAS_OK);
+
+    /* The forgery clears the checksum and the entry-set check: a
+     * listing still reports the honest child. */
+    struct cas_tree_dir listed;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &listed), CAS_OK);
+    ASSERT_INT_EQ(listed.count, 3);
+
+    for (int i = 0; i < listed.count; i++) {
+        if (strcmp(listed.entries[i].name, target) == 0)
+            ASSERT_STR_EQ(listed.entries[i].hash, good);
+    }
+    cas_tree_dir_free(&listed);
+
+    /* while a lookup follows the tables and returns the forged child.
+     * Listing and lookup disagreeing is the defect byte pinning exists
+     * to catch. */
+    struct cas_tree_entry got;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, target, &got), CAS_OK);
+    ASSERT_STR_EQ(got.hash, evil);
+
+    /* re-deriving the encoding and comparing bytes rejects it */
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_CORRUPT);
+
+    free(forged);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -1793,6 +1977,7 @@ main(void)
     RUN(test_htree_many_entries);
     RUN(test_htree_pack_import);
     RUN(test_htree_fsck_skips);
+    RUN(test_htree_forged_table_pointer);
 
     TEST_REPORT();
 }

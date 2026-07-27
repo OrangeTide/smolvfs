@@ -310,7 +310,7 @@ enum {
     CAS_FSCK_IOERR,
     CAS_FSCK_NOCODEC,    /* compressed, but no decoder to verify with */
     CAS_FSCK_REENCODED,  /* re-encoded object (htree); verify at the
-                            tree layer with cas_tree_fsck */
+                            tree layer with cas_tree_verify */
 };
 
 /** Callback for cas_fsck.  Called for each object checked.  status
@@ -319,7 +319,7 @@ enum {
  *  in, so it could not be verified.  REENCODED means the object is an
  *  htree, whose address commits to its canonical text form rather than
  *  to its stored bytes; this layer does not decode it, so verifying it
- *  is left to cas_tree_fsck.  Both are reported but not counted as a
+ *  is left to cas_tree_verify.  Both are reported but not counted as a
  *  failure.  Return 0 to continue, nonzero to stop.
  */
 typedef int (*cas_fsck_fn)(const char *hash, int status, void *ctx);

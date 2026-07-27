@@ -1283,8 +1283,71 @@ cas_tree_ref_foreach(struct cas_tree *ct, cas_tree_ref_fn fn,
  * Fsck
  ****************************************************************/
 
+/** Verify an htree against the address it is stored under.
+ *
+ *  Two checks are required, and the second is the one that is easy to
+ *  leave out.  Recovering the entry set and hashing its canonical text
+ *  form proves the object names the right children.  It does not prove
+ *  the object answers a lookup with them: entries can be reached either
+ *  by scanning the records region or by following the tables, and only
+ *  the latter is the path htree_lookup_entry takes.  An htree whose
+ *  tables point at records the scan never reaches -- one placed past the
+ *  tables, say -- passes the first check while returning a different
+ *  child from a lookup than from a listing.
+ *
+ *  Re-deriving the whole encoding and comparing bytes closes that,
+ *  whichever way the entries were recovered, and covers anything else a
+ *  forger might hide in the object.  It works because the encoding is
+ *  canonical: htree_build is a function of the sorted entry set alone.
+ *
+ *  See FORMAT.md, "Verifying an htree", and ATOLL.md A4.1.
+ */
 static int
-fsck_verify_tree_object(struct cas_tree *ct, const char *hash)
+htree_verify(const unsigned char *data, size_t len, const char *hash)
+{
+    struct cas_tree_dir dir;
+
+    /* checks the magic, the adler32, and the record framing */
+    if (htree_parse_dir(data, len, &dir) != CAS_OK)
+        return CAS_FSCK_CORRUPT;
+
+    if (dir.count > 1)
+        qsort(dir.entries, (size_t)dir.count,
+              sizeof(*dir.entries), entry_cmp);
+
+    size_t textlen;
+    char *text = tree_serialize(&dir, &textlen);
+
+    if (!text) {
+        cas_tree_dir_free(&dir);
+        return CAS_FSCK_CORRUPT;
+    }
+
+    char computed[CAS_HASH_HEX + 1];
+
+    cas_hash_object("tree", text, textlen, computed);
+    free(text);
+
+    if (strcmp(computed, hash) != 0) {
+        cas_tree_dir_free(&dir);
+        return CAS_FSCK_CORRUPT;
+    }
+
+    size_t binlen;
+    unsigned char *bin = htree_build(&dir, &binlen);
+
+    cas_tree_dir_free(&dir);
+    if (!bin)
+        return CAS_FSCK_CORRUPT;
+
+    int pinned = binlen == len && memcmp(bin, data, len) == 0;
+
+    free(bin);
+    return pinned ? CAS_FSCK_OK : CAS_FSCK_CORRUPT;
+}
+
+int
+cas_tree_verify(struct cas_tree *ct, const char *hash)
 {
     struct cas_file cf;
     char type[CAS_TYPE_MAX + 1];
@@ -1309,46 +1372,10 @@ fsck_verify_tree_object(struct cas_tree *ct, const char *hash)
         return CAS_FSCK_CORRUPT;
     }
 
-    if (cf.len < HTREE_HEADER_LEN + HTREE_FOOTER_LEN ||
-        memcmp(cf.data + cf.len - HTREE_MAGIC_LEN, HTREE_MAGIC,
-               HTREE_MAGIC_LEN) != 0) {
-        cas_close(&cf);
-        return CAS_FSCK_CORRUPT;
-    }
+    int status = htree_verify(cf.data, cf.len, hash);
 
-    size_t cdb_len = cf.len - HTREE_FOOTER_LEN;
-
-    if (load_le32(cf.data + cdb_len) != adler32(cf.data, cdb_len)) {
-        cas_close(&cf);
-        return CAS_FSCK_CORRUPT;
-    }
-
-    struct cas_tree_dir dir;
-
-    if (htree_parse_dir(cf.data, cf.len, &dir) != CAS_OK) {
-        cas_close(&cf);
-        return CAS_FSCK_CORRUPT;
-    }
     cas_close(&cf);
-
-    if (dir.count > 1)
-        qsort(dir.entries, (size_t)dir.count,
-              sizeof(*dir.entries), entry_cmp);
-
-    size_t textlen;
-    char *text = tree_serialize(&dir, &textlen);
-
-    cas_tree_dir_free(&dir);
-    if (!text)
-        return CAS_FSCK_CORRUPT;
-
-    char computed[CAS_HASH_HEX + 1];
-
-    cas_hash_object("tree", text, textlen, computed);
-    free(text);
-
-    return strcmp(computed, hash) == 0
-        ? CAS_FSCK_OK : CAS_FSCK_CORRUPT;
+    return status;
 }
 
 static int
@@ -1356,7 +1383,7 @@ fsck_tree(struct cas_tree *ct, const char *path,
           const char *tree_hash, cas_tree_fsck_fn fn, void *ctx,
           int *errors)
 {
-    int status = fsck_verify_tree_object(ct, tree_hash);
+    int status = cas_tree_verify(ct, tree_hash);
 
     if (status == CAS_FSCK_NOCODEC) {
         /* compressed tree, no decoder: a skip.  Cannot descend into
