@@ -1208,7 +1208,7 @@ status code (`CAS_FSCK_OK`, `CAS_FSCK_CORRUPT`, `CAS_FSCK_BADNAME`,
 not compiled in, so it could not be verified.  `CAS_FSCK_REENCODED`
 means the object is an `htree`, whose address commits to its canonical
 text form rather than to its stored bytes; this layer does not decode
-it, so `cas_tree_fsck` verifies it instead.  Both are reported but not
+it, so `cas_tree_verify` verifies it instead.  Both are reported but not
 counted as a failure.
 
 **Returns:** `CAS_OK` if all objects passed (skips do not fail the run),
@@ -1224,7 +1224,7 @@ Check integrity of a single object.
 **Returns:** `CAS_FSCK_OK` if valid, `CAS_FSCK_CORRUPT` if the rehash
 does not match, `CAS_FSCK_BADNAME` if the hash string is invalid,
 `CAS_FSCK_IOERR` if the object cannot be read, `CAS_FSCK_REENCODED` if
-the object is an `htree` (verify it with `cas_tree_fsck`).
+the object is an `htree` (verify it with `cas_tree_verify`).
 
 ```c
 int
@@ -1585,6 +1585,45 @@ cas_tree_fsck_root(struct cas_tree *ct, const char *root_hash,
 ```
 
 Fsck a single tree root by hash, recursively.
+
+```c
+int
+cas_tree_verify(struct cas_tree *ct, const char *hash);
+```
+
+Verify one directory object against the address it is stored under,
+without descending into it.  This is the check `cas_fsck_object` cannot
+perform: an `htree` is addressed by the canonical text form of the
+directory it encodes rather than by its own bytes, so verifying it needs
+the tree layer.
+
+A `tree` must hash to `hash` and be spelled canonically.  An `htree` must
+both encode the entry set whose text form hashes to `hash` and reproduce
+its own bytes when that entry set is re-encoded.  The second check is not
+redundant: entries can be reached by scanning the records region or by
+following the tables, and an object whose tables point elsewhere would
+otherwise pass while answering a lookup differently than a listing.
+
+**Returns:** a `CAS_FSCK_*` code.
+
+```c
+int
+cas_tree_put_checked(struct cas_tree *ct, const char *type,
+                     const void *data, size_t len, const char *hash);
+```
+
+Store an object obtained from outside, checking it first.  **This is the
+trust boundary.**  Objects are validated as they enter the depot and
+trusted when read, so use this for anything a peer, an origin, or a user
+supplied.  `cas_put_object_at` is the unchecked primitive underneath: it
+writes bytes at whatever address the caller names and verifies nothing,
+so only a caller that has already verified may use it.
+
+An `htree` gets both checks of `cas_tree_verify`.  A `tree` must hash to
+`hash` and be canonical.  Any other type must hash to `hash`.
+
+**Returns:** `CAS_OK` on success, `CAS_ERR` if the object fails its
+check, in which case nothing is stored.
 
 #### CAS-Tree garbage collection
 

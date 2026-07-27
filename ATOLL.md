@@ -1,6 +1,17 @@
 # ATOLL -- shared foundations for REEF and SHOAL
 
-Status: **proposed design. Not implemented.**
+Status: **mixed, by section.** Most of this is proposed design, but the
+verification rules are not: they ship.
+
+- **A4 Verification is implemented and normative.** A4.0 (validate on
+  write, trust on read), A4.1 (the encoding classes), and A4.3 (the
+  canonical form) are enforced in smolvfs today, by
+  `cas_tree_put_checked`, `cas_tree_verify`, and the directory parsers.
+  A4.2 (staging partial transfers) is not; there is no staging area yet.
+- **A3 Data domains is design only.** One depot per domain, and the
+  resolver that falls through between them, do not exist.
+- **A5 through A9 are design only.** No transport, codec, or protocol
+  code exists.
 
 An atoll is a reef enclosing a lagoon: one structure containing the
 others. This document holds everything the two protocol specifications

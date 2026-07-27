@@ -2282,6 +2282,93 @@ test_put_checked_rejects_forgery(void)
 }
 
 /****************************************************************
+ * Malformed htree reaching a lookup directly
+ ****************************************************************/
+
+/* cas_tree_lookup takes a bare address, so it can be handed an object
+ * that never passed cas_tree_put_checked: a depot written before the
+ * trust boundary existed, or one a caller populated through the
+ * unchecked primitive.  The probe has to hold up on its own. */
+static void
+test_htree_lookup_malformed(void)
+{
+    struct cas *store = make_store("htree_malformed");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry e = t_entry("aaa", h);
+
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+
+    ASSERT_INT_EQ(cas_open_object(store, &cf, hash, type, sizeof(type)),
+                  CAS_OK);
+
+    size_t len = cf.len;
+    unsigned char *bad = malloc(len);
+
+    ASSERT(bad != NULL);
+    if (!bad) {
+        cas_close(&cf);
+        cas_tree_free(ct);
+        cas_free(store);
+        return;
+    }
+    memcpy(bad, cf.data, len);
+    cas_close(&cf);
+
+    /* Point the slot at an offset near UINT32_MAX.  Added in 32-bit
+     * width, offset + 8 wraps to 4 and slips under the
+     * bound it is tested against, sending the read gigabytes away. */
+    size_t cdb_len = len - 8;
+    size_t spos = t_find_slot(bad, cdb_len, "aaa");
+
+    ASSERT(spos != 0);
+    t_store_le32(bad + spos + 4, 0xfffffffcu);
+    t_store_le32(bad + cdb_len, t_adler32(bad, cdb_len));
+
+    ASSERT_INT_EQ(cas_remove(store, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_put_object_at(store, "htree", bad, len, hash),
+                  CAS_OK);
+
+    struct cas_tree_entry got;
+
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, "aaa", &got), CAS_ERR);
+
+    /* admission rejects it too, so it could not have arrived this way */
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_CORRUPT);
+
+    /* A name longer than any record may hold.  Matching one would copy
+     * it into a fixed-size field, so it is refused before the probe. */
+    char toolong[CAS_TREE_NAME_MAX + 64];
+
+    memset(toolong, 'a', sizeof(toolong) - 1);
+    toolong[sizeof(toolong) - 1] = '\0';
+    ASSERT_INT_EQ(cas_tree_lookup(ct, hash, toolong, &got),
+                  CAS_ENOTFOUND);
+
+    free(bad);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -2335,6 +2422,7 @@ main(void)
     RUN(test_htree_duplicate_record_rejected);
     RUN(test_text_tree_non_canonical);
     RUN(test_put_checked_rejects_forgery);
+    RUN(test_htree_lookup_malformed);
 
     TEST_REPORT();
 }

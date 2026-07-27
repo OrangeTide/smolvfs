@@ -540,6 +540,12 @@ htree_lookup_entry(const unsigned char *data, size_t len,
 
     size_t cdb_len = len - HTREE_FOOTER_LEN;
     size_t keylen = strlen(name);
+
+    /* No valid record can carry a longer key, and matching one would
+     * copy it into a fixed-size name field below. */
+    if (keylen > CAS_TREE_NAME_MAX)
+        return CAS_ENOTFOUND;
+
     uint32_t h = djb_hash(name, keylen);
     int b = (int)(h % HTREE_NBUCKETS);
 
@@ -564,7 +570,12 @@ htree_lookup_entry(const unsigned char *data, size_t len,
             return CAS_ENOTFOUND;
         if (sh != h)
             continue;
-        if (rpos + 8 > cdb_len)
+
+        /* Every bound here widens to size_t before it is added.  These
+         * offsets come off the wire as uint32_t, so computing the sum in
+         * that width lets a value near UINT32_MAX wrap past the limit it
+         * is being tested against and the read go anywhere. */
+        if ((size_t)rpos + 8 > cdb_len)
             return CAS_ERR;
 
         uint32_t rkeylen = load_le32(data + rpos);
@@ -574,7 +585,7 @@ htree_lookup_entry(const unsigned char *data, size_t len,
             continue;
         if (rdatalen != HTREE_ENTRY_DATA_LEN)
             return CAS_ERR;
-        if (rpos + 8 + rkeylen + rdatalen > cdb_len)
+        if ((size_t)rpos + 8 + rkeylen + rdatalen > cdb_len)
             return CAS_ERR;
         if (memcmp(data + rpos + 8, name, keylen) != 0)
             continue;
