@@ -259,6 +259,124 @@ chunked); optional compression; packs / bundles; the incremental,
 verify-on-fetch download protocol (see DOWNLOAD.md); atomic,
 concurrent-safe object writes.
 
+## Comparison to a central object store
+
+The alternative worth measuring shoal against is not a product or a
+protocol. Strip away S3 and HTTP and what remains is **a central
+hash-addressed blob service with caching replicas near consumers**: hub
+and spoke, one authority, fan-out for reads. The transport is incidental.
+[DOWNLOAD.md](DOWNLOAD.md) needs only two primitives, fetch an object by
+hash and fetch a byte range, and any transport supplies those. Nothing in
+the object format requires HTTP.
+
+smolvfs already implements this alternative. A published depot served as
+static files gives incremental fetch, resumption, parallel fetch, and
+range-based pack reads today. Its Trust section also names the single
+hole: whoever controls a ref controls which tree a client materializes,
+so ref authenticity is delegated to TLS and a trusted origin.
+
+The real axis, then, is **central authority with fan-out caching** versus
+**a peer mesh with no central authority**.
+
+### What is not a differentiator
+
+Dedup, verification, immutable caching with no invalidation, and
+incremental fetch all follow from content addressing, which both designs
+have. Chunking (D9) is likewise orthogonal, helping a central store
+exactly as much as a mesh. If shoal is argued for on these grounds it is
+not argued for at all, because they are already available.
+
+### What shoal adds, in order of value per unit of work
+
+1. **Signed version records (D2, D3).** This closes the hole DOWNLOAD.md
+   names. Today the serving infrastructure must be trusted for refs, and
+   a stale or rolled-back pointer is undetectable. A signed chain with
+   `seq` monotonicity moves the trust anchor from the server to the
+   publisher, so a mirror, a cache nobody in the confederation owns, or a
+   peer can serve refs safely. The cost is Ed25519 plus a record format,
+   and it requires no networking work. It pays off even in a purely
+   central deployment.
+
+2. **Direct provider hints (D8).** Migrating shard state through a
+   central store is upload followed by download: two wide-area transfers
+   and a round trip the player waits through. A direct fetch from the
+   previous shard is one transfer, possibly within the same region. This
+   needs a fetch-source list and a serving endpoint. It does not need
+   content routing, because the client already knows where it came from
+   and carries that hint out of band.
+
+3. **Publishing while partitioned.** A shard generating new state offline
+   cannot write to an unreachable origin, and a cache cannot supply
+   content that does not exist upstream yet. A peer serves it
+   immediately. This is worth a great deal if shards genuinely run
+   disconnected, and nothing if they do not.
+
+4. **Federation across independent operators.** Self-certifying names
+   mean no single party grants write access. This decides the question
+   when shards are community-run, partner-run, or player-hosted. When one
+   operator runs everything, a central store plus signed refs is simpler
+   and better.
+
+### What the routing layer buys, specifically
+
+K-closest placement (D6), placement keys (D7), membership gossip, and
+admission consensus solve exactly one problem: finding an object when
+nobody knows who holds it.
+
+That problem is rare in this deployment. For assets, the publisher is
+known. For migrating player state, the source shard is known and named in
+the hint. For a topic, the server id is part of the name. Content routing
+is what an open network of strangers requires; a confederation of known
+servers is a different situation, and inheriting the hardest subsystem of
+such a network along with its data model is not a consequence of adopting
+the data model.
+
+The mesh also carries costs that a central store does not:
+
+- **Durability.** K replicas spread across game shards is weaker than a
+  managed store. Shards restart, are decommissioned, run on unattended
+  hardware, and are wiped between seasons. Content that cannot be
+  regenerated wants a durable home, and a peer mesh is not one.
+- **Tail latency.** A multi-hop lookup against a one-hop cache with a
+  known service level.
+- **Hot-object load.** A popular object saturates its K owners until
+  cache-through is added, which is further machinery.
+- **Debuggability.** Locating the node serving a stale head across a mesh
+  is much harder than inspecting one origin.
+
+### Consequence: resolve through a source list
+
+Rather than choosing mesh or central up front, make `get(hash)` a
+**resolver over an ordered list of sources**:
+
+```
+  local depot -> same-host or LAN peer -> named provider hint
+              -> regional mirror -> origin
+```
+
+Every source verifies by address, so adding a source can never compromise
+integrity. That property is what makes the list safe to extend, and it
+holds in smolvfs today. A source may be a static origin, a peer
+connection, a shared filesystem, or a bundle on disk, so the abstraction
+is transport-agnostic. Statically configured sources cover both the asset
+case and the migration case completely.
+
+Content routing then becomes **one more source implementation**, added
+later if discovery ever becomes the bottleneck and omitted with no change
+to any caller. That is the right position for it: a resolver plug-in
+rather than a foundation. A subset consisting of signed topics, the
+resolver with provider hints, and chunking captures items 1 through 3
+above and requires no K-closest routing, no membership protocol, and no
+Sybil resistance.
+
+### Scope boundary
+
+shoal as designed is a confederation of servers, not a swarm of players.
+Peer-to-peer among clients introduces address traversal, abuse,
+bandwidth theft, and cheat vectors that peer-to-peer among operated
+shards does not. Keeping that line drawn excludes a large class of
+problems.
+
 ## Open questions
 
 - **Unpublish / retraction.** Immutable, replicated content has no cheap
