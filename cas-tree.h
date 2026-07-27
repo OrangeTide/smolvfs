@@ -189,6 +189,30 @@ cas_tree_fsck_root(struct cas_tree *ct, const char *root_hash,
 int
 cas_tree_verify(struct cas_tree *ct, const char *hash);
 
+/** Store an object obtained from outside, checking it first.
+ *
+ *  This is the trust boundary.  Objects are validated as they enter the
+ *  depot, and objects already in the depot are trusted when read, so a
+ *  reader does no work to re-establish what this call established.  Use
+ *  it for anything a peer, an origin, or a user supplied.
+ *
+ *  cas_put_object_at is the unchecked primitive underneath: it writes
+ *  the bytes at whatever address the caller names and verifies nothing.
+ *  Only a caller that has already verified may use it.
+ *
+ *  An `htree` gets the two checks of cas_tree_verify.  A `tree` must
+ *  hash to `hash` and be spelled canonically.  Any other type must hash
+ *  to `hash`.  Returns CAS_OK on success, CAS_ERR if the object fails
+ *  its check, and nothing is stored in that case.
+ *
+ *  fsck re-runs the equivalent checks periodically, which catches what
+ *  happened to an object after it was admitted rather than what it was
+ *  when it arrived.
+ */
+int
+cas_tree_put_checked(struct cas_tree *ct, const char *type,
+                     const void *data, size_t len, const char *hash);
+
 /****************************************************************
  * Garbage collection
  ****************************************************************/

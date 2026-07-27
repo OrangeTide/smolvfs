@@ -160,6 +160,7 @@ inject.
 | Provider serves a directory with a duplicate name | Rejected before any entry is returned, so a listing and a lookup cannot disagree |
 | Provider serves a name containing an overlong `C0 AF` | Rejected as malformed UTF-8, so no separator reaches the caller (ATOLL A4.3) |
 | Provider serves a non-canonically spelled text tree | Rejected by verification, though it hashes to its own address |
+| Any of the above, then the requester walks its own depot | The forgery never entered, so the walk finds nothing to reject (ATOLL A4.0) |
 
 The disclosure-set rows matter most, because they are the only thing
 standing between a restricted domain and enumeration, and they are easy
@@ -242,7 +243,9 @@ struct reef_store {
                      uint64_t *total);
 
     /* Stage, then commit under a verified address.  Split so a partial
-     * transfer is never visible at a valid address. */
+     * transfer is never visible at a valid address, and so commit is a
+     * single place to enforce the trust boundary of ATOLL A4.0: an
+     * object that fails its check is aborted, never admitted. */
     int (*stage_open)(void *ctx, void **handle);
     int (*stage_write)(void *ctx, void *handle,
                        const void *buf, size_t len);

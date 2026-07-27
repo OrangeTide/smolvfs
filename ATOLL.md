@@ -122,6 +122,41 @@ Integrity comes from the address and never from the transport. A
 requester accepts an object only after checking it, and a provider that
 returns wrong bytes is detected here and nowhere else.
 
+### A4.0. Validate on write, trust on read
+
+Checking happens at the **trust boundary**, which is the moment an object
+obtained from outside is admitted to a depot. Nothing external is stored
+before it passes, and nothing that failed is stored at all.
+
+Once an object is in the depot it is trusted when read. A reader does no
+work to re-establish what admission established. This is what keeps
+verification affordable: an object is checked once, on the way in, rather
+than on every walk, lookup, and listing for the rest of its life.
+
+The policy has three parts, and all three are needed:
+
+1. **On write, from outside.** Full verification, by the rules of A4.1
+   and A4.3. This is the only place a malicious actor is turned away, so
+   it is the one place that may not be skipped or sampled.
+2. **On read, from the depot.** Trusted. Checks that a read performs
+   anyway, because it is already walking the bytes, are worth keeping as
+   assertions against depot damage. Checks that would change a read's
+   cost are not: they buy nothing a hostile party could have exploited,
+   since the hostile party never got past step 1.
+3. **Periodically, over the whole depot.** fsck re-runs the equivalent
+   checks. This catches what happened to an object *after* admission,
+   which is a different question from what it was when it arrived: bit
+   rot, a truncated write, a filesystem-level tamper. Admission cannot
+   detect these and a trusting read will not either.
+
+The boundary has to be a real place in the code, not a convention. In
+smolvfs it is `cas_tree_put_checked`, and the unchecked primitive beneath
+it, `cas_put_object_at`, writes bytes at whatever address the caller
+names and verifies nothing. A REEF requester commits through the checked
+call. Anything reaching for the primitive is asserting it has already
+verified, and is where to look first when something malformed turns up in
+a depot.
+
 ### A4.1. Three encoding classes, and no fourth
 
 Every stored encoding must be checkable against the address. Three
@@ -200,7 +235,8 @@ checked by a reader rather than trusted:
 
 A provider serving a directory object that breaks either rule is serving
 a malformed object, and the requester rejects it rather than repairing
-it.
+it. Per A4.0 this happens on admission, so a later walk of the same
+object in the depot may assume both rules hold.
 
 ### A4.4. Normalization is a producer's problem
 

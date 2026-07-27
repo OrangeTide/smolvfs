@@ -2190,6 +2190,98 @@ test_text_tree_non_canonical(void)
 }
 
 /****************************************************************
+ * The write-side trust boundary
+ ****************************************************************/
+
+static void
+test_put_checked_rejects_forgery(void)
+{
+    struct cas *store = make_store("put_checked");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    static const char *names[] = { "aaa", "bbb", "ccc", };
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        struct cas_tree_entry e = t_entry(names[i], h);
+
+        ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    }
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+
+    ASSERT_INT_EQ(cas_open_object(store, &cf, hash, type, sizeof(type)),
+                  CAS_OK);
+
+    size_t len = cf.len;
+    unsigned char *bytes = malloc(len);
+
+    ASSERT(bytes != NULL);
+    if (!bytes) {
+        cas_close(&cf);
+        cas_tree_free(ct);
+        cas_free(store);
+        return;
+    }
+    memcpy(bytes, cf.data, len);
+    cas_close(&cf);
+
+    /* honest bytes are admitted, and admitting them twice is fine */
+    ASSERT_INT_EQ(cas_remove(store, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_put_checked(ct, "htree", bytes, len, hash),
+                  CAS_OK);
+    ASSERT_INT_EQ(cas_tree_put_checked(ct, "htree", bytes, len, hash),
+                  CAS_OK);
+
+    /* Rename a record so the object no longer re-derives.  This is what
+     * a hostile peer would hand a fetch. */
+    size_t cdb_len = len - 8;
+    size_t spos = t_find_slot(bytes, cdb_len, "ccc");
+
+    ASSERT(spos != 0);
+
+    uint32_t rec = t_le32(bytes + spos + 4);
+
+    memcpy(bytes + rec + 8, "zzz", 3);
+    t_store_le32(bytes + cdb_len, t_adler32(bytes, cdb_len));
+
+    ASSERT_INT_EQ(cas_remove(store, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_put_checked(ct, "htree", bytes, len, hash),
+                  CAS_ERR);
+
+    /* nothing was stored, so the depot never held the forgery */
+    ASSERT_INT_EQ(cas_exists(store, hash), 0);
+
+    /* a blob whose bytes do not match the address it claims */
+    char bh[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "real", 4, bh), CAS_OK);
+    ASSERT_INT_EQ(cas_remove(store, bh), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_put_checked(ct, "blob", "fake", 4, bh),
+                  CAS_ERR);
+    ASSERT_INT_EQ(cas_tree_put_checked(ct, "blob", "real", 4, bh),
+                  CAS_OK);
+
+    free(bytes);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -2242,6 +2334,7 @@ main(void)
     RUN(test_duplicate_names_rejected);
     RUN(test_htree_duplicate_record_rejected);
     RUN(test_text_tree_non_canonical);
+    RUN(test_put_checked_rejects_forgery);
 
     TEST_REPORT();
 }

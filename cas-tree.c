@@ -600,18 +600,19 @@ tree_text_lookup(const unsigned char *data, size_t len,
     const char *p = (const char *)data + 1;
     const char *end = (const char *)data + len;
     struct cas_tree_entry prev;
-    int have_prev = 0, found = 0;
+    int have_prev = 0;
 
-    /* Scans every line rather than stopping at the match.  Stopping
-     * early would leave the rest of the object unchecked, so a duplicate
-     * name further down would be invisible here while tree_text_load
-     * rejected it, and the two would disagree about the same object.
-     * A text tree is the small-directory encoding, and this loop was
-     * already O(n) in the worst case, so the cost is bounded by what a
-     * load of the same object pays.
+    /* Stops at the match, and validates only the lines it passed on the
+     * way.  A read does not re-verify a whole object: objects are
+     * checked as they enter the store, and what is in the store is
+     * trusted (see cas_tree_put_checked).  Scanning past the answer to
+     * re-prove a property that was established on write would be work
+     * every lookup pays and no lookup needs.
      *
-     * An htree does not do this: its lookup is O(1) by design and
-     * assumes the object was verified.  See cas_tree_verify. */
+     * The prefix check is kept because it is free.  This loop compares
+     * names anyway, and the early exit below is only sound while the
+     * order holds, so noticing a break in it costs nothing and keeps the
+     * function from silently reporting a name absent. */
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
 
@@ -627,17 +628,21 @@ tree_text_lookup(const unsigned char *data, size_t len,
         if (have_prev && name_cmp(prev.name, e.name) >= 0)
             return CAS_ERR;
 
-        if (!found && name_cmp(e.name, name) == 0) {
+        int cmp = name_cmp(e.name, name);
+
+        if (cmp == 0) {
             *e_out = e;
-            found = 1;
+            return CAS_OK;
         }
+        if (cmp > 0)
+            return CAS_ENOTFOUND;
 
         prev = e;
         have_prev = 1;
         p = nl + 1;
     }
 
-    return found ? CAS_OK : CAS_ENOTFOUND;
+    return CAS_ENOTFOUND;
 }
 
 /****************************************************************
@@ -1545,6 +1550,35 @@ cas_tree_verify(struct cas_tree *ct, const char *hash)
 
     cas_close(&cf);
     return status;
+}
+
+int
+cas_tree_put_checked(struct cas_tree *ct, const char *type,
+                     const void *data, size_t len, const char *hash)
+{
+    if (!ct || !type || !hash || (!data && len > 0))
+        return CAS_ERR;
+
+    if (strcmp(type, "htree") == 0) {
+        if (htree_verify(data, len, hash) != CAS_FSCK_OK)
+            return CAS_ERR;
+        return cas_put_object_at(ct->store, type, data, len, hash);
+    }
+
+    /* Every other type is addressed by its own plaintext, so the
+     * address is the check. */
+    char computed[CAS_HASH_HEX + 1];
+
+    if (cas_hash_object(type, data, len, computed) != CAS_OK)
+        return CAS_ERR;
+    if (strcmp(computed, hash) != 0)
+        return CAS_ERR;
+
+    if (strcmp(type, "tree") == 0 &&
+        tree_text_verify(data, len) != CAS_FSCK_OK)
+        return CAS_ERR;
+
+    return cas_put_object_at(ct->store, type, data, len, hash);
 }
 
 static int

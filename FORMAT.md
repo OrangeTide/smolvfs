@@ -405,18 +405,33 @@ about authenticity, since a producer of forged bytes computes it too.
 A reader selects the parser by object type (`tree` vs `htree`), never by
 sniffing content.
 
-### What a lookup may assume
+### Where these rules are enforced
 
-Listing a directory validates it: both parsers walk every entry and
-enforce "Entry order", so an out-of-order or duplicated name is rejected
-before any entry is returned.
+**On write, for anything from outside.** An object obtained from a peer,
+an origin, or a user is fully checked before it is admitted to a depot,
+and is not stored at all if it fails. That is the only point at which a
+hostile producer is turned away, so it is the point that may not be
+skipped.
 
-Looking one name up is not the same. A text tree is scanned linearly
-either way, so a lookup validates the whole object as it goes and agrees
-with a listing by construction. An htree lookup is a single probe through
-the tables, and checking global order would cost exactly what the
-encoding exists to avoid, so **an htree lookup assumes the object was
-already verified**. Verify before trusting one from an untrusted source.
+**On read, not again.** An object already in the depot is trusted. A
+reader re-establishing what admission established would be work paid on
+every walk for the rest of the object's life, against an adversary who
+never got in.
+
+Reads still keep the checks they get for free. Both directory parsers
+walk every entry anyway, so both enforce "Entry order" as they go, which
+costs one comparison per entry and catches depot damage rather than
+forgery. A text-tree lookup validates the lines it passes on the way to
+its answer, because it is comparing names regardless and its early exit
+is only sound while the order holds. An htree lookup is a single probe
+through the tables and checks nothing global, since doing so would cost
+exactly what the encoding exists to avoid.
+
+**Periodically, over everything.** fsck re-runs the full checks. This
+answers a different question from admission: not whether an object was
+sound when it arrived, but whether it still is. Bit rot, a truncated
+write, and a tamper below the library are invisible to both of the
+first two.
 
 ## Object map
 
