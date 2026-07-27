@@ -122,31 +122,40 @@ Integrity comes from the address and never from the transport. A
 requester accepts an object only after checking it, and a provider that
 returns wrong bytes is detected here and nowhere else.
 
-### A4.1. Rules by type
+### A4.1. Three encoding classes, and no fourth
 
-- A `blob` or a text `tree`, and any compressed object after decoding, is
-  accepted only if `BLAKE2b-256("type len\0" || plaintext)` equals the
-  address it was fetched under.
-- An **`htree` cannot be verified this way.** It is addressed by its
-  canonical text form, so hashing its own stored bytes yields something
-  else. Today a requester validates its internal adler32 and, in the pack
-  transport, relies on the footer checksum covering the index.
+Every stored encoding must be checkable against the address. Three
+classes are admissible and the list is closed. The full byte-level rules
+are in [FORMAT.md](FORMAT.md); what matters here is the obligation each
+class places on a requester.
 
-This is a real weakness and it is confined to the re-encoded types. An
-adler32 is a corruption check, not an integrity check: it is trivial to
-forge, so a malicious provider can serve a doctored `htree` that passes.
-The guarantee that holds for every other type does not hold for this one.
+1. **Raw.** The stored bytes are the plaintext. Hash them.
+2. **Transparent.** A total, deterministic decode recovers the
+   plaintext and the stored form carries nothing else. Decode, then hash
+   the plaintext. This is compression.
+3. **Canonically re-encoded.** The stored form is a deterministic
+   function of the plaintext and additionally carries a read path the
+   plaintext does not constrain. Two checks are required: recover the
+   plaintext and hash it against the address, **and** re-derive the
+   stored form from that plaintext and compare it byte-for-byte. This is
+   `htree`.
 
-**This is an open design question, scheduled for its own session.** The
-options on the table are to remove re-encoded types entirely and drop
-`tree` in favour of `htree`, or to draw a tight border around a fixed set
-of core re-encoded types with a policy that forbids extension. Until it
-is settled, implementations must treat an `htree` from an untrusted
-provider as unverified, and the safest posture is to fetch `htree`
-objects only from providers trusted for other reasons.
+The line between 2 and 3 is the whole of it. A compressed object's only
+read path is decoding, so recovering the plaintext is a complete check.
+An `htree` carries a hash table that a lookup consults directly, and
+recovering the correct entry set does not prove the table agrees with it.
+Only pinning every byte does.
 
-`chunked` (SHOAL D9) is fully verifiable by reassembly and does not
-inherit the problem, which is one argument for the border-drawing option.
+**An internal checksum is never an integrity check.** The `htree` adler32
+and the packfile index checksum are corruption pre-filters, cheap to
+evaluate and trivial to forge. Neither may stand in for verification
+against the address, and no encoding may be admitted whose stored form
+can only be checked that way.
+
+`chunked` (SHOAL D9) is class 3 with respect to its chunk list, which is
+checkable on arrival. The plaintext it names cannot be recovered without
+the chunks, so that half of the check is **deferred** until they are
+present. Deferral is permitted; absence of a check is not.
 
 ### A4.2. Partial transfers are never visible
 
@@ -355,7 +364,6 @@ recommended by an implementation rather than fixed here.
 
 ## Open questions
 
-- **Re-encoded type verification** (A4.1), scheduled for its own session.
 - **Domain of a chunk.** A manifest in a restricted domain may reference
   chunks identical to public ones. Deduplicating across that boundary
   reintroduces the confirmation attack of A3.3, so the safe default is

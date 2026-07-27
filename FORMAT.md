@@ -64,13 +64,24 @@ plaintext has the same address whether it is stored raw, compressed, or
 2. **Compressed** - the stored bytes are a codec tag plus a compressed
    payload; the address still commits to the plaintext. Signalled by
    the v2 trailer magic.
-3. **Re-encoded** - an `htree` object stores a directory in a
-   hash-table layout, but its address is the hash of the *canonical
-   `tree` text form* of the same directory, not of the htree bytes. An
-   `htree` therefore cannot be verified by hashing its own bytes; a
-   verifier must reconstruct the text form, or trust an outer integrity
-   check (the packfile index checksum and the htree's internal
-   adler32).
+3. **Canonically re-encoded** - an `htree` object stores a directory in
+   a hash-table layout, but its address is the hash of the *canonical
+   `tree` text form* of the same directory, not of the htree bytes. It
+   is verified in two steps rather than one; see "Verifying an htree"
+   below.
+
+Every encoding is verifiable against the address, and no fourth class
+may be added that is not. The distinction between 2 and 3 is that a
+compressed object's only read path is decoding, so recovering the
+plaintext is a complete check, whereas an htree carries a second read
+path (the hash table) that the plaintext does not constrain. Any
+encoding adding such a path belongs to class 3 and must be pinned
+byte-for-byte.
+
+An internal checksum is never an integrity check. The htree's adler32
+and the packfile index checksum detect corruption cheaply; neither
+resists forgery, and neither may stand in for verification against the
+address.
 
 ## Codec tags
 
@@ -260,8 +271,10 @@ u32 nslots         number of slots in this bucket's table
 
 **Records.** One per entry, concatenated. A reader locates records
 through the tables by offset, so their physical order is not
-significant (this implementation emits them in the sorted-name order
-used for the canonical address, but a consumer must not rely on it):
+significant to a *reader*, which locates them through the tables. It is
+significant to a *producer*: records are emitted in the sorted-name order
+used for the canonical address, because the whole encoding is pinned (see
+"Verifying an htree"):
 
 ```
 u32 keylen                    length of the name
@@ -304,6 +317,37 @@ u32 adler32                   Adler-32 checksum over all bytes before
 
 **Adler-32.** The standard checksum: `a = 1, b = 0`; for each byte,
 `a = (a + byte) % 65521`, `b = (b + a) % 65521`; result `(b << 16) | a`.
+
+### Verifying an htree
+
+An htree is accepted only when **both** of these hold:
+
+1. **The entry set is right.** Recover the entries, sort them
+   byte-wise by name, serialize the canonical `tree` text form, and
+   require `BLAKE2b-256("tree" len\0 || text)` to equal the address the
+   object was fetched under.
+2. **The encoding is pinned.** Re-derive the htree from those same
+   entries and require the result to equal the stored bytes exactly.
+
+Step 1 alone is not sufficient, and the reason is worth stating because
+it is not obvious. Entries can be recovered two ways, by scanning the
+records region or by following the tables, and only the second is the
+path a lookup takes. An object whose tables point at records the record
+scan never reaches will pass step 1 while returning different data from
+a name lookup, so a directory listing and a lookup would disagree about
+the same object. Step 2 covers every byte and forecloses this, whichever
+way step 1 recovered the entries.
+
+Because step 2 compares bytes, the layout is **canonical**: given an
+entry set, exactly one valid htree encoding exists. Records appear in
+sorted-name order, each bucket's table has `2 * bucket_count` slots, and
+placement follows the probing rule below. The `HTv1` footer magic selects
+which derivation applies, so a future layout revision becomes `HTv2`
+rather than invalidating stored objects.
+
+The adler32 is a corruption pre-filter. Checking it first avoids the cost
+of the two steps above on a damaged object; passing it means nothing
+about authenticity, since a producer of forged bytes computes it too.
 
 A reader selects the parser by object type (`tree` vs `htree`), never by
 sniffing content.

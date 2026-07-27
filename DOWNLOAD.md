@@ -284,18 +284,23 @@ descendant address, and the pack index supplies the sizes.
 
 ## Trust
 
-The verification rules are ATOLL.md A4, including the unresolved weakness
-around `htree` and the other re-encoded types. They apply unchanged here:
-object integrity is self-verifying and does not depend on the transport.
+The verification rules are ATOLL.md A4. They apply unchanged here: object
+integrity is self-verifying and does not depend on the transport.
 
-Two points are specific to this profile:
+Three points are specific to this profile:
 
 - A compressed object is fetched as stored (codec tag plus payload) and
   decoded locally, so decoding requires the matching codec compiled into
   the client.
-- In the packfile transport an `htree` additionally benefits from the
-  footer checksum covering the index, mirroring `cas_pack_import`. That
-  is a corruption check and not an integrity check, per A4.1.
+- An `htree` is class 3, so a client must run both checks of A4.1:
+  reconstruct the canonical `tree` text and hash it against the address,
+  then re-derive the htree and compare bytes. A client that stops at the
+  adler32 has not verified the object, and a client unwilling to
+  implement the second check must refuse `htree` objects rather than
+  accept them unchecked.
+- In the packfile transport the footer checksum covers the index,
+  mirroring `cas_pack_import`. Like the adler32 it is a corruption
+  pre-filter and carries no authenticity, per A4.1.
 
 The one thing the client must obtain authentically is the ref: it is the
 root of the Merkle structure, so whoever controls the ref controls which
