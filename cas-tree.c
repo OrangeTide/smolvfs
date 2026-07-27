@@ -85,6 +85,97 @@ cas_tree_dir_free(struct cas_tree_dir *dir)
     dir->_cap = 0;
 }
 
+/****************************************************************
+ * Name validation and canonical ordering
+ ****************************************************************/
+
+/** Compare two names in unsigned byte order.
+ *
+ *  This is the canonical order.  For well-formed UTF-8 it is also
+ *  codepoint order, because UTF-8 is designed so that byte-wise
+ *  comparison and codepoint comparison agree, so a single rule serves
+ *  both and no table is needed to apply it.
+ *
+ *  Spelled out with memcmp rather than strcmp because the ordering is
+ *  part of the format: it must be unsigned, and it must break a tie
+ *  between a name and its own prefix by length.
+ */
+static int
+name_cmp(const char *a, const char *b)
+{
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t n = la < lb ? la : lb;
+    int c = memcmp(a, b, n);
+
+    if (c != 0)
+        return c;
+    if (la != lb)
+        return la < lb ? -1 : 1;
+    return 0;
+}
+
+/** Reject anything that is not well-formed UTF-8.
+ *
+ *  Strict about the three encodings a lenient decoder would accept and
+ *  a canonical form must not: an overlong sequence, a surrogate, and a
+ *  codepoint past U+10FFFF.  Overlong forms matter most.  Without this
+ *  check a name may carry C0 AF, which is not the byte 0x2F and so slips
+ *  past the separator test below, yet decodes to U+002F in any consumer
+ *  that is not equally strict.
+ *
+ *  Normalization is deliberately not attempted: NFC would need Unicode
+ *  tables this library will not carry.  A producer that wants a name to
+ *  address the same on every platform must normalize before storing it.
+ *  Byte-distinct names are distinct entries here.
+ */
+static int
+valid_utf8(const char *s, size_t len)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    size_t i = 0;
+
+    while (i < len) {
+        unsigned char c = p[i];
+        uint32_t cp, min;
+        int extra;
+
+        if (c < 0x80) {
+            i++;
+            continue;
+        } else if ((c & 0xe0) == 0xc0) {
+            cp = c & 0x1fu; extra = 1; min = 0x80;
+        } else if ((c & 0xf0) == 0xe0) {
+            cp = c & 0x0fu; extra = 2; min = 0x800;
+        } else if ((c & 0xf8) == 0xf0) {
+            cp = c & 0x07u; extra = 3; min = 0x10000;
+        } else {
+            return 0;  // continuation byte, or a 5-byte or longer form
+        }
+
+        if (i + (size_t)extra >= len)
+            return 0;
+
+        for (int k = 1; k <= extra; k++) {
+            unsigned char cc = p[i + k];
+
+            if ((cc & 0xc0) != 0x80)
+                return 0;
+            cp = (cp << 6) | (cc & 0x3fu);
+        }
+
+        if (cp < min)
+            return 0;  // overlong
+        if (cp >= 0xd800 && cp <= 0xdfff)
+            return 0;  // surrogate
+        if (cp > 0x10ffff)
+            return 0;
+
+        i += (size_t)extra + 1;
+    }
+    return 1;
+}
+
 int
 cas_tree_dir_add(struct cas_tree_dir *dir,
                  const struct cas_tree_entry *e)
@@ -94,6 +185,8 @@ cas_tree_dir_add(struct cas_tree_dir *dir,
     if (nlen == 0 || nlen > CAS_TREE_NAME_MAX)
         return CAS_ERR;
     if (strchr(e->name, '/') || strchr(e->name, '\n'))
+        return CAS_ERR;
+    if (!valid_utf8(e->name, nlen))
         return CAS_ERR;
 
     if (dir->count >= dir->_cap) {
@@ -414,6 +507,17 @@ htree_parse_dir(const unsigned char *data, size_t len,
                            (const char *)(data + pos), keylen, &e);
         pos += keylen + datalen;
 
+        /* Records are stored in ascending name order, so requiring it
+         * here costs one comparison and rejects both a reordered object
+         * and a duplicate name.  A duplicate is what matters: it would
+         * let a listing and a lookup disagree about which child a name
+         * has, the same divergence htree_verify exists to catch. */
+        if (dir->count > 0 &&
+            name_cmp(dir->entries[dir->count - 1].name, e.name) >= 0) {
+            cas_tree_dir_free(dir);
+            return CAS_ERR;
+        }
+
         if (cas_tree_dir_add(dir, &e) != CAS_OK) {
             cas_tree_dir_free(dir);
             return CAS_ERR;
@@ -495,7 +599,19 @@ tree_text_lookup(const unsigned char *data, size_t len,
 
     const char *p = (const char *)data + 1;
     const char *end = (const char *)data + len;
+    struct cas_tree_entry prev;
+    int have_prev = 0, found = 0;
 
+    /* Scans every line rather than stopping at the match.  Stopping
+     * early would leave the rest of the object unchecked, so a duplicate
+     * name further down would be invisible here while tree_text_load
+     * rejected it, and the two would disagree about the same object.
+     * A text tree is the small-directory encoding, and this loop was
+     * already O(n) in the worst case, so the cost is bounded by what a
+     * load of the same object pays.
+     *
+     * An htree does not do this: its lookup is O(1) by design and
+     * assumes the object was verified.  See cas_tree_verify. */
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
 
@@ -508,19 +624,20 @@ tree_text_lookup(const unsigned char *data, size_t len,
         if (parse_entry(p, linelen, &e) != CAS_OK)
             return CAS_ERR;
 
-        int cmp = strcmp(e.name, name);
+        if (have_prev && name_cmp(prev.name, e.name) >= 0)
+            return CAS_ERR;
 
-        if (cmp == 0) {
+        if (!found && name_cmp(e.name, name) == 0) {
             *e_out = e;
-            return CAS_OK;
+            found = 1;
         }
-        if (cmp > 0)
-            return CAS_ENOTFOUND;
 
+        prev = e;
+        have_prev = 1;
         p = nl + 1;
     }
 
-    return CAS_ENOTFOUND;
+    return found ? CAS_OK : CAS_ENOTFOUND;
 }
 
 /****************************************************************
@@ -533,7 +650,7 @@ entry_cmp(const void *a, const void *b)
     const struct cas_tree_entry *ea = a;
     const struct cas_tree_entry *eb = b;
 
-    return strcmp(ea->name, eb->name);
+    return name_cmp(ea->name, eb->name);
 }
 
 int
@@ -543,6 +660,14 @@ cas_tree_store(struct cas_tree *ct, struct cas_tree_dir *dir,
     if (dir->count > 1)
         qsort(dir->entries, (size_t)dir->count,
               sizeof(*dir->entries), entry_cmp);
+
+    /* Two entries under one name have no canonical order, so the
+     * address they produce would depend on how qsort happened to break
+     * the tie.  Refuse rather than mint an unstable address. */
+    for (int i = 1; i < dir->count; i++) {
+        if (name_cmp(dir->entries[i - 1].name, dir->entries[i].name) == 0)
+            return CAS_ERR;
+    }
 
     size_t textlen;
     char *text = tree_serialize(dir, &textlen);
@@ -645,6 +770,13 @@ tree_text_load(const unsigned char *data, size_t len,
         struct cas_tree_entry e;
 
         if (parse_entry(p, linelen, &e) != CAS_OK) {
+            cas_tree_dir_free(dir);
+            return CAS_ERR;
+        }
+
+        /* ascending, strictly: see the same check in htree_parse_dir */
+        if (dir->count > 0 &&
+            name_cmp(dir->entries[dir->count - 1].name, e.name) >= 0) {
             cas_tree_dir_free(dir);
             return CAS_ERR;
         }
@@ -1283,6 +1415,39 @@ cas_tree_ref_foreach(struct cas_tree *ct, cas_tree_ref_fn fn,
  * Fsck
  ****************************************************************/
 
+/** Check that a text tree is spelled canonically.
+ *
+ *  Hashing the bytes already binds them to the address, so a
+ *  non-canonical text is not a forgery: it is a second, self-consistent
+ *  object for the same directory. That is still worth catching, because
+ *  it means one directory has two addresses and will not dedup, and
+ *  loading it and storing it back silently moves it.
+ *
+ *  The check is the same shape as the htree one: parse, re-serialize,
+ *  compare. It rejects the spellings sscanf would otherwise accept, a
+ *  signed uid or a differently padded mode among them.
+ */
+static int
+tree_text_verify(const unsigned char *data, size_t len)
+{
+    struct cas_tree_dir dir;
+
+    if (tree_text_load(data, len, &dir) != CAS_OK)
+        return CAS_FSCK_CORRUPT;
+
+    size_t textlen;
+    char *text = tree_serialize(&dir, &textlen);
+
+    cas_tree_dir_free(&dir);
+    if (!text)
+        return CAS_FSCK_CORRUPT;
+
+    int canonical = textlen == len && memcmp(text, data, len) == 0;
+
+    free(text);
+    return canonical ? CAS_FSCK_OK : CAS_FSCK_CORRUPT;
+}
+
 /** Verify an htree against the address it is stored under.
  *
  *  Two checks are required, and the second is the one that is easy to
@@ -1363,7 +1528,11 @@ cas_tree_verify(struct cas_tree *ct, const char *hash)
         return CAS_FSCK_CORRUPT;
 
     if (strcmp(type, "tree") == 0) {
+        int status = tree_text_verify(cf.data, cf.len);
+
         cas_close(&cf);
+        if (status != CAS_FSCK_OK)
+            return status;
         return cas_fsck_object(ct->store, hash);
     }
 

@@ -1931,6 +1931,265 @@ test_htree_forged_table_pointer(void)
 }
 
 /****************************************************************
+ * Canonicalization: names, ordering, duplicates
+ ****************************************************************/
+
+static struct cas_tree_entry
+t_entry(const char *name, const char *hash)
+{
+    struct cas_tree_entry e = {
+        .mode = 0100644, .uid = 1, .gid = 2,
+        .mtime_s = 100, .mtime_ns = 0,
+    };
+
+    memcpy(e.hash, hash, CAS_HASH_HEX + 1);
+    strcpy(e.name, name);
+    return e;
+}
+
+static void
+test_name_utf8_validation(void)
+{
+    struct cas *store = make_store("utf8_names");
+    struct cas_tree *ct = cas_tree_new(store);
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    /* An overlong encoding of '/' (C0 AF).  strchr never sees the byte
+     * 0x2F, so only the UTF-8 check stops it becoming a separator in a
+     * consumer that decodes leniently. */
+    struct cas_tree_entry bad = t_entry("a", h);
+
+    bad.name[0] = (char)0xc0;
+    bad.name[1] = (char)0xaf;
+    bad.name[2] = '\0';
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &bad), CAS_ERR);
+
+    /* a lone continuation byte */
+    struct cas_tree_entry cont = t_entry("a", h);
+
+    cont.name[0] = (char)0x80;
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &cont), CAS_ERR);
+
+    /* a truncated two-byte sequence */
+    struct cas_tree_entry trunc = t_entry("a", h);
+
+    trunc.name[0] = (char)0xc3;
+    trunc.name[1] = '\0';
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &trunc), CAS_ERR);
+
+    /* a surrogate, ED A0 80 = U+D800 */
+    struct cas_tree_entry surr = t_entry("abc", h);
+
+    surr.name[0] = (char)0xed;
+    surr.name[1] = (char)0xa0;
+    surr.name[2] = (char)0x80;
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &surr), CAS_ERR);
+
+    /* well-formed multi-byte names are accepted */
+    struct cas_tree_entry ok = t_entry("caf\xc3\xa9", h);   // cafe + U+00E9
+
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &ok), CAS_OK);
+    ASSERT_INT_EQ(dir.count, 1);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_name_order_is_codepoint_order(void)
+{
+    struct cas *store = make_store("utf8_order");
+    struct cas_tree *ct = cas_tree_new(store);
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    /* U+00E9 encodes as C3 A9, so it sorts after 'z' (0x7A) by bytes
+     * and after U+007A by codepoint.  UTF-8 makes the two agree, which
+     * is why one byte-wise rule suffices. */
+    struct cas_tree_entry a = t_entry("\xc3\xa9", h);      // U+00E9
+    struct cas_tree_entry b = t_entry("z", h);
+    struct cas_tree_entry c = t_entry("z\xc3\xa9", h);     // "z" + U+00E9
+
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &a), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &b), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &c), CAS_OK);
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    struct cas_tree_dir loaded;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &loaded), CAS_OK);
+    ASSERT_INT_EQ(loaded.count, 3);
+    ASSERT_STR_EQ(loaded.entries[0].name, "z");
+    ASSERT_STR_EQ(loaded.entries[1].name, "z\xc3\xa9");
+    ASSERT_STR_EQ(loaded.entries[2].name, "\xc3\xa9");
+    cas_tree_dir_free(&loaded);
+
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_OK);
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_duplicate_names_rejected(void)
+{
+    struct cas *store = make_store("dup_names");
+    struct cas_tree *ct = cas_tree_new(store);
+    char h1[CAS_HASH_HEX + 1], h2[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "one", 3, h1), CAS_OK);
+    ASSERT_INT_EQ(cas_put(store, "two", 3, h2), CAS_OK);
+
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    struct cas_tree_entry a = t_entry("same", h1);
+    struct cas_tree_entry b = t_entry("same", h2);
+
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &a), CAS_OK);
+    ASSERT_INT_EQ(cas_tree_dir_add(&dir, &b), CAS_OK);
+
+    /* qsort is not stable, so the address would depend on how the tie
+     * was broken.  Refused instead. */
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_ERR);
+
+    cas_tree_dir_free(&dir);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_htree_duplicate_record_rejected(void)
+{
+    struct cas *store = make_store("htree_dup");
+    struct cas_tree *ct = cas_tree_new(store);
+
+    cas_tree_set_flags(ct, CAS_TREE_USE_HTREE);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    static const char *names[] = { "aaa", "bbb", "ccc", };
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        struct cas_tree_entry e = t_entry(names[i], h);
+
+        ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    }
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(ct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+
+    ASSERT_INT_EQ(cas_open_object(store, &cf, hash, type, sizeof(type)),
+                  CAS_OK);
+
+    size_t len = cf.len;
+    unsigned char *forged = malloc(len);
+
+    ASSERT(forged != NULL);
+    if (!forged) {
+        cas_close(&cf);
+        cas_tree_free(ct);
+        cas_free(store);
+        return;
+    }
+    memcpy(forged, cf.data, len);
+    cas_close(&cf);
+
+    /* Rename the "ccc" record to "aaa".  The names are the same length,
+     * so every offset is unchanged and only the key bytes move.  The
+     * record sequence becomes aaa, bbb, aaa: both duplicated and out of
+     * order. */
+    size_t cdb_len = len - 8;
+    size_t spos = t_find_slot(forged, cdb_len, "ccc");
+
+    ASSERT(spos != 0);
+
+    uint32_t rec = t_le32(forged + spos + 4);
+
+    memcpy(forged + rec + 8, "aaa", 3);
+    t_store_le32(forged + cdb_len, t_adler32(forged, cdb_len));
+
+    ASSERT_INT_EQ(cas_remove(store, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_put_object_at(store, "htree", forged, len, hash),
+                  CAS_OK);
+
+    struct cas_tree_dir listed;
+
+    ASSERT_INT_EQ(cas_tree_load(ct, hash, &listed), CAS_ERR);
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_CORRUPT);
+
+    free(forged);
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+static void
+test_text_tree_non_canonical(void)
+{
+    struct cas *store = make_store("text_noncanon");
+    struct cas_tree *ct = cas_tree_new(store);
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(store, "x", 1, h), CAS_OK);
+
+    /* A mode padded to seven octal digits instead of six.  sscanf reads
+     * it as the same value, so the entry set is identical, but the text
+     * is not what tree_serialize would emit.  The bytes hash to their
+     * own address, so cas_fsck_object is content; only the
+     * canonicality check notices. */
+    char text[512];
+    int n = snprintf(text, sizeof(text), "%%0100644 1 2 100 0 %s a\n", h);
+
+    ASSERT(n > 0 && (size_t)n < sizeof(text));
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put_object(store, "tree", text, (size_t)n, hash),
+                  CAS_OK);
+    ASSERT_INT_EQ(cas_fsck_object(store, hash), CAS_FSCK_OK);
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_CORRUPT);
+
+    /* the canonical spelling of the same directory verifies */
+    n = snprintf(text, sizeof(text), "%%100644 1 2 100 0 %s a\n", h);
+    ASSERT(n > 0 && (size_t)n < sizeof(text));
+    ASSERT_INT_EQ(cas_put_object(store, "tree", text, (size_t)n, hash),
+                  CAS_OK);
+    ASSERT_INT_EQ(cas_tree_verify(ct, hash), CAS_FSCK_OK);
+
+    cas_tree_free(ct);
+    cas_free(store);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -1978,6 +2237,11 @@ main(void)
     RUN(test_htree_pack_import);
     RUN(test_htree_fsck_skips);
     RUN(test_htree_forged_table_pointer);
+    RUN(test_name_utf8_validation);
+    RUN(test_name_order_is_codepoint_order);
+    RUN(test_duplicate_names_rejected);
+    RUN(test_htree_duplicate_record_rejected);
+    RUN(test_text_tree_non_canonical);
 
     TEST_REPORT();
 }

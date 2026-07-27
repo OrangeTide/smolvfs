@@ -220,12 +220,54 @@ re-hashing against the index `hash`.
 
 A directory is a list of entries, each with a name, POSIX-style mode,
 owner/group ids, modification time, and the address of the child object
-(a `blob` for a file, a `tree`/`htree` for a subdirectory). Entries are
-sorted ascending by name (byte-wise) to make the encoding canonical:
-the address of a directory depends only on its contents, not on
-insertion order.
+(a `blob` for a file, a `tree`/`htree` for a subdirectory).
 
-Two encodings share one address (the `tree` address):
+Two encodings share one address (the `tree` address). The rules below
+apply to both, and a reader enforces them rather than assuming them.
+
+### Entry names
+
+A name is between 1 and 255 octets and must not contain `/`, `\n`, or
+NUL. It must also be **well-formed UTF-8**, rejecting the three things a
+lenient decoder would accept:
+
+- an **overlong** sequence, encoding a codepoint in more octets than it
+  needs;
+- a **surrogate**, U+D800 through U+DFFF;
+- anything **past U+10FFFF**.
+
+Overlong forms are the reason this is a hard requirement rather than
+advice. The two octets `C0 AF` are not the octet `0x2F`, so they pass a
+test for `/`, yet they decode to U+002F in any consumer less strict than
+this one. A name that is a path separator on arrival but not on
+inspection is a path traversal waiting to happen.
+
+Normalization is **not** performed. NFC would require Unicode tables this
+format will not carry, so byte-distinct names are distinct entries even
+when they render identically. A producer that needs a name to address the
+same on every platform must normalize before storing, which matters most
+between systems that disagree by default, macOS decomposing where Linux
+does not.
+
+### Entry order
+
+Entries appear in **strictly ascending order by name, compared as
+unsigned octets**. For well-formed UTF-8 this is also codepoint order,
+because UTF-8 is built so that octet-wise and codepoint-wise comparison
+agree; one rule serves both and needs no table. Where one name is a
+prefix of another the shorter sorts first.
+
+Strictly ascending has two consequences, and the second is the point:
+
+- The encoding is canonical, so a directory's address depends only on its
+  contents and not on insertion order.
+- **Duplicate names are impossible.** Two entries sharing a name have no
+  canonical order between them, so the address would depend on how a sort
+  happened to break the tie. Worse, a duplicate lets a listing and a
+  lookup disagree about which child a name has, which is the same class
+  of divergence "Verifying an htree" addresses.
+
+A reader that meets an out-of-order or repeated name rejects the object.
 
 ### Text tree (`tree`)
 
@@ -246,6 +288,16 @@ by one line per entry:
 
 The object type is `tree` and its address is the hash of `tree len\0`
 followed by this payload.
+
+Each field has exactly one spelling. The mode is octal padded to at least
+six digits; the numeric fields carry no sign, no leading zeros, and no
+padding; single spaces separate them and a single `\n` ends each line. A
+lenient parser would read `0100644` and `+1` as the same values a
+canonical line spells `100644` and `1`, producing a second address for
+one directory. The bytes are what the address commits to, so such an
+object is not a forgery, merely a duplicate that will never dedup and
+that moves when it is loaded and stored back. Verification rejects it:
+re-serializing a parsed text tree must reproduce it exactly.
 
 ### Htree (`htree`)
 
@@ -271,10 +323,11 @@ u32 nslots         number of slots in this bucket's table
 
 **Records.** One per entry, concatenated. A reader locates records
 through the tables by offset, so their physical order is not
-significant to a *reader*, which locates them through the tables. It is
-significant to a *producer*: records are emitted in the sorted-name order
-used for the canonical address, because the whole encoding is pinned (see
-"Verifying an htree"):
+significant to a *reader* looking one up, which goes through the tables.
+It is significant everywhere else: records are emitted in the strictly
+ascending name order of "Entry order" above, both because the whole
+encoding is pinned (see "Verifying an htree") and because scanning them
+in order is what makes a duplicate name detectable at all:
 
 ```
 u32 keylen                    length of the name
@@ -351,6 +404,19 @@ about authenticity, since a producer of forged bytes computes it too.
 
 A reader selects the parser by object type (`tree` vs `htree`), never by
 sniffing content.
+
+### What a lookup may assume
+
+Listing a directory validates it: both parsers walk every entry and
+enforce "Entry order", so an out-of-order or duplicated name is rejected
+before any entry is returned.
+
+Looking one name up is not the same. A text tree is scanned linearly
+either way, so a lookup validates the whole object as it goes and agrees
+with a listing by construction. An htree lookup is a single probe through
+the tables, and checking global order would cost exactly what the
+encoding exists to avoid, so **an htree lookup assumes the object was
+already verified**. Verify before trusting one from an untrusted source.
 
 ## Object map
 
