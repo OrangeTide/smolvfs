@@ -7,6 +7,9 @@ later, [SHOAL.md](SHOAL.md) with no network and no wire format, so that
 protocol logic can be tested on its own and the same tests can be reused
 by anyone who vendors smolvfs and supplies their own encoding.
 
+Shared foundations, including the transport contract these seams
+implement, are in [ATOLL.md](ATOLL.md).
+
 PUBLIC DOMAIN (CC0-1.0)
 
 ## The idea
@@ -16,10 +19,13 @@ feed call and leave through a send call, tagged with an address the core
 copies but never interprets. That one seam is what lets the same object
 file run over UDP, over a WebSocket, and through an encrypted tunnel.
 
-This framework applies the same discipline twice, because REEF has two
-things to abstract rather than one.
+This framework applies the same discipline three times. Two of the seams
+exist so an implementer can replace them; the third exists so the test
+suite can.
 
 ```
+                 storage seam    depot  |  in-memory shim
+                       |
   protocol logic (walk, verify, disclosure set, session state)
   ------------------------------------------------------------
   codec seam        message struct  <->  octets
@@ -32,7 +38,7 @@ things to abstract rather than one.
 Everything above the codec seam is what the conformance suite tests.
 Everything below either seam is somebody else's problem, including ours.
 
-## Two seams, not one
+## The seams
 
 **The transport seam** carries a message to a named peer and delivers
 messages back. It never names a socket, and it never inspects a payload.
@@ -145,6 +151,11 @@ inject.
 | Provider answers `NotFound` in a restricted domain | Conformance failure: existence leaked |
 | Provider offers a feature not in `Hello` | Requester ignores it rather than following |
 | Two providers, one honest and one corrupt | The walk completes from the honest one |
+| Provider omits `status`, so it decodes as `Unset` | Treated as a violation, never as success (ATOLL A7.4) |
+| Provider returns a short read on every `GetRange` | The walk still terminates and does not spin |
+| Provider retires a request by timeout mid-transfer | Requester frees the id only after `Cancelled` |
+| Requester cancels one of several in-flight requests | The others complete undisturbed |
+| Provider changes `total` between replies for one address | Session fails rather than assembling a mixture |
 
 The disclosure-set rows matter most, because they are the only thing
 standing between a restricted domain and enumeration, and they are easy
@@ -186,25 +197,73 @@ Sketch, following the existing tree:
 
 ```
   reef.c / reef.h            protocol logic, both roles
+  reef-store-cas.c           storage seam over a real depot
   reef-codec-ref.c           the reference codec
   simnet.c / simnet.h        deterministic in-memory network
+  simnet-store.c             storage seam over memory
   test_reef.c                the conformance suite
 ```
 
-`reef.c` links against `cas.h` and `cas-tree.h` for storage and against
-neither seam's implementation. simnet and the reference codec are test
-scaffolding a vendor may keep or discard, which is why they are separate
-translation units rather than `#ifdef` blocks inside the protocol.
+`reef.c` includes none of the seams' implementations, and in particular
+does not include `cas.h`: only `reef-store-cas.c` does. simnet, the
+memory store, and the reference codec are test scaffolding a vendor may
+keep or discard, which is why they are separate translation units rather
+than `#ifdef` blocks inside the protocol.
+
+## Storage: the third seam
+
+simnet nodes back their depots **in memory**, not on disk. A test that
+spins up eight peers, partitions them, and replays a walk should not
+touch the filesystem, and an in-memory store makes fault injection
+(serve the wrong bytes for this address, once) trivial where a real
+depot would need the bytes corrupted on disk first.
+
+This has a consequence worth stating plainly: `struct cas` is a concrete
+type bound to a depot directory and a lock file, with no indirection. An
+in-memory store therefore cannot be a `struct cas`, so **`reef.c` must
+not take one**. It takes a small storage interface instead, satisfied
+both by a real depot and by the simulator's shim:
+
+```c
+/* Storage seam.  Everything REEF needs from a depot, and no more. */
+struct reef_store {
+    /* Does this address exist locally? */
+    int (*exists)(void *ctx, const uint8_t addr[32]);
+
+    /* Read up to len octets of the stored form at offset.  Returns the
+     * count read, or negative on error.  Sets *total to the full stored
+     * length. */
+    ssize_t (*pread)(void *ctx, const uint8_t addr[32],
+                     void *buf, size_t len, uint64_t offset,
+                     uint64_t *total);
+
+    /* Stage, then commit under a verified address.  Split so a partial
+     * transfer is never visible at a valid address. */
+    int (*stage_open)(void *ctx, void **handle);
+    int (*stage_write)(void *ctx, void *handle,
+                       const void *buf, size_t len);
+    int (*stage_commit)(void *ctx, void *handle,
+                        const uint8_t addr[32]);
+    void (*stage_abort)(void *ctx, void *handle);
+
+    /* Resolve a ref name to a root address. */
+    int (*ref_read)(void *ctx, const char *name, uint8_t addr[32]);
+
+    void *ctx;
+};
+```
+
+The depot-backed implementation is a thin wrapper over `cas_exists`,
+`cas_open_loose_raw`, the temp-file-plus-rename path already inside
+`cas_put_object_at`, and `cas_tree_ref_read`. Writing it is also a useful
+check on whether those APIs expose what a network layer needs.
+
+Transport and codec are the seams an implementer is expected to replace.
+Storage is the one the test suite replaces and most implementers will
+not.
 
 ## Open questions
 
-- **Where the disclosure set lives.** Provider-side session state in
-  `reef.c` is the obvious home, but a static-origin adapter has no
-  sessions and can only serve the public domain. Whether that is a stated
-  limitation or something the adapter fakes is undecided.
-- **How much of a peer the framework simulates.** A provider needs a real
-  depot to serve from. Whether simnet nodes get temporary on-disk depots
-  or an in-memory `struct cas` shim changes what the suite can cover.
 - **Message struct shape.** One tagged union keeps the seams simple but
   makes the struct as large as its biggest member. Whether that matters
   depends on how many sessions a shard runs at once.

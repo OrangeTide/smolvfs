@@ -68,7 +68,9 @@ is specified in [FORMAT.md](FORMAT.md); the object map has its own
 producer or consumer, for example a server that ships bundles to a
 smolvfs client.  [DOWNLOAD.md](DOWNLOAD.md) describes an incremental
 CAS-over-HTTP protocol for fetching a snapshot from static hosting while
-downloading only the objects a client lacks.  [PRUNING.md](PRUNING.md)
+downloading only the objects a client lacks; it is the HTTP profile of
+the transport-agnostic protocol in [REEF.md](REEF.md), whose shared
+foundations live in [ATOLL.md](ATOLL.md).  [PRUNING.md](PRUNING.md)
 explains how a mutation-heavy ref bounds depot growth by truncating its
 snapshot log, and the sparse reference contract that keeps that safe.
 

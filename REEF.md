@@ -1,11 +1,16 @@
-# REEF -- a transport-agnostic protocol for fetching content-addressed objects
+# REEF -- the content plane
 
 Status: **proposed design. Not implemented.**
 
 REEF moves immutable, content-addressed objects between a requester and a
-provider. It is the content plane. Naming, signing, and federation are
-the concern of SHOAL (see [SHOAL.md](SHOAL.md)), which is specified
-separately and layers on top.
+provider. Naming, signing, and federation are the concern of SHOAL
+([SHOAL.md](SHOAL.md)), which layers on top.
+
+**[ATOLL.md](ATOLL.md) holds everything this specification shares with
+SHOAL**: terminology, addresses on the wire, data domains, the
+verification rules, the transport contract, message sizing, the schema
+notation, the shared enumerations, and cancellation. This document does
+not restate them and cannot be read without them.
 
 A reef is accreted immutable structure that only grows, which is what a
 content-addressed depot is. A shoal is the mobile group that lives around
@@ -13,28 +18,15 @@ it.
 
 PUBLIC DOMAIN (CC0-1.0)
 
-## Relationship to the other documents
-
-- [FORMAT.md](FORMAT.md) specifies object bytes. REEF moves those bytes
-  and does not reinterpret them.
-- [DOWNLOAD.md](DOWNLOAD.md) is the HTTP static-hosting profile of this
-  protocol: the same walk, expressed as plain `GET` against an origin
-  with no server-side logic. It remains valid and is the baseline any
-  other transport is measured against.
-- [SHOAL.md](SHOAL.md) supplies signed topic heads, the data domains REEF
-  enforces, and the resolver that decides which provider to ask.
-
 ## Goals
 
 - Fetch objects and byte ranges by address, verified against that
-  address, over any transport that can carry bounded messages.
-- Keep the provider free of protocol state that scales with content:
-  a static origin adapter must be able to implement the whole thing.
-- Let an implementer supply their own encoding without changing the
-  protocol's meaning.
-- Enforce the data domains of SHOAL D11 through D13, so a restricted
-  domain cannot be enumerated.
-- Be testable without a network (see [FRAMEWORK.md](FRAMEWORK.md)).
+  address, over any transport meeting the contract in ATOLL A5.
+- Keep the provider free of state that scales with content, so a static
+  origin can implement the public-domain subset.
+- Enforce the domain rules of ATOLL A3, so a restricted domain cannot be
+  enumerated.
+- Be testable without a network ([FRAMEWORK.md](FRAMEWORK.md)).
 
 ## Non-goals
 
@@ -42,247 +34,166 @@ PUBLIC DOMAIN (CC0-1.0)
 - Object mutation and upload. A provider serves what it holds. Content
   arrives in a depot by local means or by SHOAL's authoritative push,
   never by an unsolicited REEF write.
-- Reliability, congestion control, encryption, and peer authentication.
-  All belong to the transport, which surfaces only its conclusions.
+- Reliability, congestion control, encryption, and peer authentication,
+  all of which belong to the transport.
 - Live game state. REEF carries immutable content: assets, checkpoints,
   and slowly-changing authoritative records. Per-tick entity state
   belongs on the game's own netcode.
 
-## The transport contract
+## Sessions and requests
 
-REEF is defined over **messages**, not streams or datagrams. A transport
-is usable if it provides all of the following.
-
-1. **Whole messages.** A message is delivered intact or not at all. The
-   transport never hands up a fragment.
-2. **A known maximum message size.** Both ends learn `msg_max` during the
-   handshake. REEF never emits a message larger than the peer's stated
-   limit.
-3. **Per-request ordering.** Messages carrying the same request id arrive
-   in the order they were sent. No ordering is required *between*
-   different request ids, which is what allows a datagram transport to
-   run requests concurrently without a global sequence.
-4. **Reliability within a session.** A message accepted for sending is
-   delivered or the session fails. REEF has no retransmission of its own.
-5. **A peer identity conclusion.** The transport reports whether the peer
-   is anonymous, an authenticated client, or a federation member. REEF
-   turns that into a domain and never performs authentication itself.
-
-Nothing else is assumed. In particular the transport may reorder across
-requests, may multiplex REEF with unrelated traffic, and may close the
-session at any point.
-
-Three transports are expected to matter:
-
-- **HTTP or HTTPS.** Request and response map onto `GET`, ranges onto
-  `Range`. This is the DOWNLOAD.md profile, and it can serve a depot as
-  static files with no application logic.
-- **A reliable datagram library.** netchan supplies reliable ordered
-  channels over UDP, so a REEF session is one channel and `msg_max`
-  follows from the channel's payload limit.
-- **A plain TCP stream.** A length prefix in front of each message
-  satisfies the contract, in the manner of SMTP or NNTP.
-
-## Sessions, requests, and flow
-
-A **session** is one requester talking to one provider. It opens with a
-handshake, carries some number of requests, and closes. Session state is
-small and bounded: negotiated parameters, the in-flight request table,
-and, in a restricted domain, the disclosure set described below.
+A **session** is one requester talking to one provider. Its state is
+bounded: negotiated parameters, the in-flight request table, and, in a
+restricted domain, the disclosure set.
 
 A **request** is identified by a `req` id chosen by the requester. An id
-must not be reused while a request bearing it is outstanding. Requests
-are independent, so a provider may answer them in any order, and a
-requester may have up to `max_inflight` of them open at once.
+must not be reused while a request bearing it is outstanding, nor before
+its `Cancelled` reply arrives if it was retired (ATOLL A9). Requests are
+independent, so a provider may answer them in any order and a requester
+may keep up to `max_inflight` open.
 
-Every request produces exactly one logical reply, which may arrive as
-several messages when the payload exceeds `msg_max` (see Segmentation).
+Every request produces one logical reply, which may arrive as several
+messages when the payload exceeds `msg_max`.
 
-## Segmentation
+## Capabilities
 
-An object is usually larger than one message. There are two ways to move
-it, and a provider must implement the first.
+Two capabilities move an object larger than one message. **Neither is
+mandatory**, and a session that negotiates neither is conformant but can
+fetch only objects that fit in a single message.
 
-**Ranged pull is the baseline.** The requester issues `GetRange` for
-successive windows sized to fit `msg_max`, and each reply is one
-`ObjectData`. This needs no provider state, resumes trivially, gives the
-requester exact flow control, and is what an HTTP origin already does
-with `Range`. A provider that implements nothing else is conformant.
+- `FEAT_RANGE` -- the provider answers `GetRange`, returning the window
+  the requester asked for. Needs no provider state, resumes trivially,
+  and is what an HTTP origin already does with `Range`.
+- `FEAT_MULTIPART` -- a single `Get` may be answered by a run of
+  `ObjectData` messages, `more = 1` on every part but the last. This
+  removes a round trip per window, which matters a great deal at
+  netchan's 2 KiB ceiling (ATOLL A6) and not at all over HTTP.
 
-**Multipart push is an optional capability.** When both ends set
-`FEAT_MULTIPART`, a single `Get` may be answered by a run of
-`ObjectData` messages with `more = 1` on every part but the last. This
-removes a round trip per window, which matters on a high-latency link and
-not at all on a local one. The requester bounds the provider's output by
-declining the feature.
+`FEAT_HAVE` is independent and covers the batch existence query.
 
-Segmentation is a transport concern and is unrelated to the content
-chunking of SHOAL D9. A chunked object's manifest and its chunks are
-ordinary objects here, each fetched by its own address.
+### A provider may insist
 
-## Domains and disclosure
+A provider is free to require capabilities of its requesters:
 
-The session's domain comes from the transport's identity conclusion, and
-it selects which depot answers, per SHOAL D12. Resolution runs toward
-more permissive domains and never back.
+- It may refuse the session outright, answering `HelloAck` with
+  `Status.Unsupported`, when the requester offers neither transfer
+  capability and the provider serves nothing small enough to be useful.
+- It may refuse an individual `Get` that would exceed `msg_max` when no
+  transfer capability was negotiated, answering `Status.TooLarge`.
 
-The public domain answers any address. Restricted domains must not,
-because anyone holding a candidate plaintext can compute its address and
-ask, which turns a guess into a confirmation and makes low-entropy
-records enumerable (SHOAL D13).
+**A `TooLarge` reply must still carry `total`.** Without it the requester
+learns only that it failed, when what it needs to know is how big the
+object is, so it can decide whether to negotiate differently or ask
+another provider. This is the one case where a failed reply carries
+useful data.
 
-REEF enforces this with a **disclosure set**. An address is fetchable in
-a restricted domain only if it is either:
+## Segmentation and completion
 
-- a root the session is authorized for, obtained through `GetRef` for a
-  ref name the peer may read; or
+An object is complete when the requester holds octets `0` through
+`total` contiguously **and** the address verifies (ATOLL A4). The hash is
+the real completeness check; contiguity is bookkeeping that decides when
+to run it.
+
+Rules that make this workable:
+
+- A reply's `offset` equals the offset of the request that produced it,
+  and its payload length is at most what was asked for. A provider may
+  return less for any reason, and the requester must tolerate a short
+  read rather than treating it as an error.
+- Under `FEAT_MULTIPART`, the parts of one request are contiguous and in
+  increasing offset order, beginning at the request's offset and ending
+  with `more = 0`.
+- `total` must not change between replies for one address within a
+  session. A change is a protocol violation and fails the session.
+- The requester **may** run concurrent requests for different windows of
+  one object under distinct ids, in which case it owns the reassembly. It
+  must not store anything until the contiguity and hash conditions above
+  both hold.
+
+The simple strategy, and the one the conformance suite exercises, is
+sequential: issue the next `GetRange` at the offset where the last reply
+ended, appending to a staging file as ATOLL A4.2 requires.
+
+Segmentation is a transport concern, unrelated to the content chunking of
+SHOAL D9. A chunked object's manifest and its chunks are ordinary objects
+here, each fetched by its own address, and chunking is the preferred way
+to avoid large staging entirely.
+
+## Domains and the disclosure set
+
+The session's domain comes from the transport's identity conclusion and
+selects which depot answers, per ATOLL A3.2.
+
+The public domain answers any address. Restricted domains must not
+(ATOLL A3.3), and REEF enforces that with a **disclosure set**. An
+address is fetchable in a restricted domain only if it is either:
+
+- a root the session is authorized for, obtained through `GetRef`; or
 - an address that appeared inside the body of an object already delivered
   in this session.
 
-This is cheap. The provider keeps a per-session set of addresses it has
-handed out, seeded by authorized roots and extended as objects are sent.
-It also matches how a requester actually works, since child addresses are
-learned by reading their parent. Walking a tree therefore proceeds
-normally, while asking for an unrelated address fails.
+The provider keeps a per-session set seeded by authorized roots and
+extended as objects are sent. This is cheap, and it matches how a
+requester actually works, since child addresses are learned by reading
+their parent. Walking a tree proceeds normally while asking for an
+unrelated address fails. The set is bounded by the graph the session may
+read and is discarded when the session closes.
 
-The set is bounded by the size of the graph the session is authorized to
-read, and it is discarded when the session closes.
+### Which refs a session may read is SHOAL's business
 
-### Errors must not leak existence
+`GetRef` seeds the disclosure set, so the mapping from peer identity to
+readable ref names is the hinge the whole mechanism turns on. **REEF does
+not define it.** It is SHOAL's, and until SHOAL specifies it an
+implementation must default to refusing every name outside the public
+domain rather than inventing a policy. A disclosure set seeded from an
+unauthorized root defeats the entire mechanism.
 
-In a restricted domain, "no such object" and "you may not have that
-object" are the same answer: `Denied`. A provider that distinguishes them
-reintroduces exactly the enumeration D13 forbids. The public domain has
-nothing to protect and may return `NotFound`.
+### A static origin serves the public domain only
 
-## Schema notation
+The disclosure set is per-session state and a static origin has no
+sessions. It cannot distinguish requesters, so everything it can serve it
+will serve to anyone. A static-origin provider is therefore **conformant
+only in the public domain**. This is a stated limitation, not something
+the adapter fakes.
 
-The message schema is written in a small IDL. It describes field names,
-types, numbers, and grouping. It does **not** describe a byte layout: any
-encoding that preserves the semantics below is conformant, and an
-implementer is expected to supply one.
-
-The notation is deliberately identical to netchan's microser IDL so that
-generator can produce a codec directly, but the definition here is
-self-contained and does not depend on that project.
-
-### Grammar
-
-A line beginning with `#` is a comment. Three block forms exist, each
-closed by `end`:
-
-```
-enum NAME
-    MEMBER = <integer>
-    ...
-end
-
-message NAME
-    <type> <field> = <number>
-    ...
-end
-
-dispatch NAME
-    <tag> MESSAGE
-    ...
-end
-```
-
-A `message` may contain a discriminated union:
-
-```
-message NAME
-    case ENUM <field> = <number>
-        MEMBER:
-            <type> <field> = <number>
-        ...
-    end
-end
-```
-
-### Types
-
-`uint8`, `int8`, `uint16`, `int16`, `uint32`, `int32`, `uint64`, `int64`
-are integers of the stated width and signedness. `bytes` is an opaque
-octet string. `string` is a `bytes` whose content is UTF-8 text.
-
-### Semantics an encoding must preserve
-
-- **Fields are numbered from 1 to 31** and identified by number, not
-  position. An encoding may place them in any order.
-- **Every field is optional.** A field absent from a message decodes to
-  zero, or to an empty `bytes` or `string`.
-- **An unknown field is skipped, not an error.** A reader that meets a
-  field number it does not recognise must be able to step past it and
-  continue. This is what lets a newer writer add a field without breaking
-  an older reader, and it is the only forward-compatibility mechanism
-  either protocol relies on.
-- **A `bytes` or `string` field carries at most 65535 octets.**
-- **A `dispatch` block assigns each message a tag** in 1 to 255, unique
-  within the block. The tag identifies which message follows.
-- **In a `case` union**, the discriminant field selects which variants are
-  meaningful; variants belonging to other members decode to zero.
-
-### Packed arrays
-
-The IDL has no repeated field. Where REEF needs a list of fixed-width
-elements it packs them into one `bytes` field as their concatenation,
-with the element width fixed by the field's definition and the count
-implied by the length. An address list is therefore `n * 32` octets, and
-at most 2047 addresses fit in one field.
-
-This convention is REEF's, not the notation's. A field using it says so.
+An origin may still sit behind its own access control, as DOWNLOAD.md
+describes. That is not REEF enforcing a domain; it is the origin
+admitting or refusing a request before REEF is involved, with no
+disclosure set and so no defence against enumeration by anyone admitted.
+Safe for high-entropy content, unsafe for guessable records.
 
 ## Messages
 
-Addresses on the wire are the **32 raw octets** of the BLAKE2b-256
-digest, not the 64-character hex form used in file names and APIs.
-
-Object payloads are the **stored form**: the bytes as they sit in the
-depot, data region followed by trailer, exactly as DOWNLOAD.md serves a
-loose object. Compression and the re-encoded types therefore survive the
-transfer untouched, and the requester verifies after decoding locally.
+Addresses are 32 raw octets (ATOLL A2). Object payloads are the stored
+form (ATOLL A1), so compression and the re-encoded types survive transfer
+untouched and the requester verifies per ATOLL A4.
 
 ```
-# REEF v1 message schema.
+# REEF v1 message schema.  Notation and shared enums: ATOLL A7, A8.
 
-enum Status
-    Ok          = 0
-    NotFound    = 1     # public domain only; see Errors must not leak
-    Denied      = 2     # not permitted, or absent in a restricted domain
-    TooLarge    = 3     # request exceeds a negotiated limit
-    Unsupported = 4     # feature not negotiated
-    Malformed   = 5
-    Internal    = 6
-end
-
-enum Domain
-    Local   = 0         # never appears on the wire; a local depot is not served
-    Server  = 1
-    Client  = 2
-    Public  = 3
-end
-
-# Feature bits, carried in the features field as a set.
-#   0x01  FEAT_RANGE       GetRange is supported (required in v1)
+# Feature bits, carried in the features field as a set.  None is
+# mandatory; see Capabilities.
+#   0x01  FEAT_RANGE       GetRange is answered
 #   0x02  FEAT_MULTIPART   a Get may be answered by several ObjectData
-#   0x04  FEAT_HAVE        Have is supported
+#   0x04  FEAT_HAVE        Have is answered
 #   remaining bits reserved; an unrecognised bit is ignored
 
 message Hello
     uint16 version      = 1     # protocol version, 1
     uint32 features     = 2     # what the requester can accept
-    uint32 msg_max      = 3     # largest message the requester will receive
+    uint32 msg_max      = 3     # largest message the requester receives
     uint16 max_inflight = 4     # requests the requester will keep open
 end
 
 message HelloAck
     uint16 version      = 1
     uint32 features     = 2     # the intersection both ends will use
-    uint32 msg_max      = 3     # largest message the provider will receive
+    uint32 msg_max      = 3     # largest message the provider receives
     uint16 max_inflight = 4     # ceiling the provider imposes
-    uint8  domain       = 5     # Domain granted to this session
-    uint8  status       = 6
+    uint32 req_timeout  = 5     # ms after which the provider may retire a
+                                # request; 0 means it states no policy
+    uint8  domain       = 6     # Domain granted to this session
+    uint8  status       = 7
 end
 
 message GetRef
@@ -316,17 +227,21 @@ end
 message GetRange
     uint32 req    = 1
     bytes  addr   = 2
-    uint32 offset = 3           # octets into the stored form
-    uint32 length = 4           # octets requested
+    uint64 offset = 3           # octets into the stored form
+    uint32 length = 4           # a maximum; the provider may return less
 end
 
 message ObjectData
     uint32 req     = 1
     uint8  status  = 2
-    uint32 offset  = 3          # where this payload sits in the stored form
-    uint32 total   = 4          # total stored length of the object
+    uint64 offset  = 3          # where this payload sits in the stored form
+    uint64 total   = 4          # total stored length; set even on TooLarge
     uint8  more    = 5          # 1 if further parts follow for this req
     bytes  payload = 6
+end
+
+message Cancel
+    uint32 req    = 1           # request to retire; see ATOLL A9
 end
 
 message Fault
@@ -345,88 +260,114 @@ dispatch Reef
      7 Get
      8 GetRange
      9 ObjectData
-    10 Fault
+    10 Cancel
+    11 Fault
 end
 ```
+
+Offsets and lengths are 64-bit so the protocol does not impose a size
+ceiling of its own, matching the storage seam in FRAMEWORK.md. `length`
+stays 32-bit because no single reply approaches 4 GiB.
 
 ## Conversation rules
 
 - The requester sends `Hello` first and waits for `HelloAck`. A provider
-  that answers anything else has failed the session.
-- `features` in `HelloAck` is the set both ends will use, and it must be
-  a subset of what `Hello` offered. Asking for an unnegotiated feature
+  answering anything else has failed the session.
+- `features` in `HelloAck` is the set both ends will use and must be a
+  subset of what `Hello` offered. Asking for an unnegotiated feature
   earns `Unsupported`.
-- `msg_max` is directional. Each side states what it can receive, and
-  neither may exceed the other's figure.
-- A provider must not have more than `max_inflight` requests open from
+- `msg_max` is directional. Each side states what it can receive and
+  neither may exceed the other's figure. The floor is 1024 octets
+  (ATOLL A6); a smaller figure fails the session.
+- The sender of a payload is responsible for fitting it inside the
+  receiver's `msg_max`, since a requester cannot compute encoded sizes
+  through a pluggable codec.
+- A provider must not hold more than `max_inflight` open requests from
   one requester; the excess earns `TooLarge`.
 - A reply carries the `req` of its request. A `Fault` with `req = 0` is a
-  session-level failure and the session ends.
+  session-level failure and ends the session.
+- Every reply carries an explicit `status`. A decoded `Status.Unset` is a
+  protocol violation (ATOLL A7.4), never a success.
 - A requester verifies every object against the address it asked for
-  before storing it. A provider that returns wrong bytes is detected here
-  and nowhere else, which is the property the whole design rests on.
+  before committing it, and stages partial transfers per ATOLL A4.2.
+
+### Have and undisclosed addresses
+
+In a restricted domain a batch may name addresses outside the disclosure
+set. The provider **reports those absent** rather than failing the
+request. Absent is the truthful answer from the requester's point of
+view, it leaks nothing, and it avoids an error path that would itself
+distinguish disclosed addresses from undisclosed ones.
+
+`Have` remains useful under disclosure scoping. The requester already
+knows the addresses, having read them from a parent; what it does not
+know is *which provider holds them*, which is precisely what a batch
+query answers and what multi-provider fetch needs.
 
 ## Worked exchange
 
-Materialising a snapshot named `world` over a datagram transport, with
-`msg_max` of 1024 and multipart declined:
+Materialising a snapshot named `world` over netchan, `msg_max` 2048,
+multipart declined:
 
 ```
-->  Hello       version=1 features=RANGE|HAVE msg_max=1024 max_inflight=8
-<-  HelloAck    version=1 features=RANGE|HAVE msg_max=1024 max_inflight=8
-                domain=Client status=Ok
+->  Hello       version=1 features=RANGE|HAVE msg_max=2048 max_inflight=8
+<-  HelloAck    version=1 features=RANGE|HAVE msg_max=2048 max_inflight=8
+                req_timeout=30000 domain=Client status=Ok
 
 ->  GetRef      req=1 name="world"
 <-  RefValue    req=1 status=Ok root=8eb26db6...
 
 # the root is now in the disclosure set
 
-->  GetRange    req=2 addr=8eb26db6... offset=0 length=1000
-<-  ObjectData  req=2 status=Ok offset=0 total=412 more=0 payload=...
+->  GetRange    req=2 addr=8eb26db6... offset=0 length=2048
+<-  ObjectData  req=2 status=Ok offset=0 total=412 more=0 payload=<412>
 
-# that tree names three children, all now disclosed; ask which are needed
-# after testing locally with cas_exists
+# the provider returned less than asked: the whole object fits.  That
+# tree names three children, all now disclosed.  Two are missing locally.
 
 ->  Have        req=3 addrs=<2 packed addresses>
 <-  HaveReply   req=3 status=Ok present=0b11
 
-->  GetRange    req=4 addr=<child a> offset=0 length=1000
-->  GetRange    req=5 addr=<child b> offset=0 length=1000
-<-  ObjectData  req=5 status=Ok offset=0 total=1000 more=0 payload=...
-<-  ObjectData  req=4 status=Ok offset=0 total=8300 more=0 payload=...
-->  GetRange    req=6 addr=<child a> offset=1000 length=1000
+->  GetRange    req=4 addr=<child a> offset=0 length=2048
+->  GetRange    req=5 addr=<child b> offset=0 length=2048
+<-  ObjectData  req=5 status=Ok offset=0 total=1400 more=0 payload=<1400>
+<-  ObjectData  req=4 status=Ok offset=0 total=8300 more=0 payload=<1900>
+
+# short read: the codec's overhead left room for 1900, not 2048.  The
+# requester appends to staging and continues from where the reply ended.
+
+->  GetRange    req=6 addr=<child a> offset=1900 length=2048
 ...
+
+# the player disconnects; the walk is abandoned
+->  Cancel      req=6
+<-  ObjectData  req=6 status=Cancelled offset=1900 total=8300 more=0
 ```
 
-Replies to different request ids arrive out of order, which the contract
-permits. Replies within one id do not.
+Replies to different ids arrive out of order, which the contract permits.
+Replies within one id do not.
 
 ## Deferred
 
-- **Pack transport.** DOWNLOAD.md fetches a pack index and then reads
-  object extents by range, which collapses many HTTP requests into few.
-  A multiplexing message transport gains much less from this, and SHOAL
-  D12 requires a pack never span domains. A feature bit is reserved and
-  the mechanism is left unspecified in v1.
+- **Pack transport.** DOWNLOAD.md fetches a pack index then reads object
+  extents by range, collapsing many HTTP requests into few. A
+  multiplexing message transport gains much less, and ATOLL A3.2 requires
+  a pack never span domains. A feature bit is reserved; the mechanism is
+  unspecified in v1.
 - **Provider-initiated content.** A provider populating its own depot is
-  a local operation and needs no protocol. Authoritative update across
-  servers is SHOAL's problem, not REEF's.
-- **Compression negotiation.** Objects already carry their own codec tag,
-  so transport compression would mostly recompress compressed bytes.
+  a local operation needing no protocol. Authoritative update across
+  servers is SHOAL's problem.
+- **Compression negotiation.** Objects carry their own codec tag, so
+  transport compression would mostly recompress compressed bytes.
 
 ## Open questions
 
 - **Disclosure set cost.** Bounded by the authorized graph, but a session
   walking a very large tree accumulates a large set. Whether to cap it,
-  and what to do when the cap is hit, is undecided.
-- **`Have` in restricted domains.** A batch existence query is useful for
-  skipping content the requester already holds, but it answers questions
-  about addresses. Restricting it to the disclosure set keeps it safe and
-  also makes it much less useful, since disclosed addresses are the ones
-  the requester already knows about.
-- **Ranges past `uint32`.** Offsets and lengths are 32-bit, capping a
-  single object at 4 GiB of stored form. Chunking makes this unreachable
-  in practice, but the field widths are a v1 commitment.
-- **Session resumption.** Reconnecting currently discards the disclosure
-  set and starts from a root again. Whether that is worth optimising
-  depends on how often sessions drop mid-walk.
+  and what to do at the cap, is undecided.
+- **Session resumption.** Reconnecting discards the disclosure set and
+  restarts from a root. Whether that is worth optimising depends on how
+  often sessions drop mid-walk.
+- **Recommended `req_timeout`.** The field exists and the provider's
+  right to retire is functional rather than advisory (ATOLL A9), but a
+  sensible default is not yet chosen.

@@ -1,23 +1,47 @@
-# smolvfs incremental download protocol
+# DOWNLOAD -- REEF over HTTP and static hosting
 
-This describes how a client fetches a snapshot from a remote depot over
-HTTP while downloading only the objects it does not already hold, in the
-spirit of a git fetch. It targets static hosting: the server is a plain
-HTTP origin or CDN serving files, with no smolvfs-specific logic. All
-negotiation happens on the client, which is possible because objects are
-content-addressed and the client can test locally what it already has.
+This is **REEF's HTTP profile**: how a client fetches a snapshot from a
+remote depot over HTTP, downloading only the objects it does not already
+hold, in the spirit of a git fetch. It targets static hosting, where the
+server is a plain HTTP origin or CDN serving files with no
+smolvfs-specific logic. All negotiation happens on the client, which is
+possible because objects are content-addressed and the client can test
+locally what it already has.
+
+It is the one profile deployable with zero server code, and for that
+reason it stays the baseline every other transport is measured against.
+
+Read [ATOLL.md](ATOLL.md) first for the shared foundations, and
+[REEF.md](REEF.md) for the protocol this profiles. This document adds
+only what is specific to HTTP and static files: the URL layout, cache
+policy, the packfile byte-range transport, and the limits static hosting
+imposes. Where the two disagree about anything else, REEF governs.
 
 Byte layouts referenced here (objects, trailers, the packfile index and
 footer, tree and htree directories) are specified in
 [FORMAT.md](FORMAT.md); this document does not restate them.
 
-This is also the **HTTP profile of REEF** ([REEF.md](REEF.md)), which
-generalises the same walk to any transport that carries bounded messages.
-The two agree on the primitives (fetch an object, fetch a byte range,
-resolve a ref) and on verification. Where they differ, this document
-governs static hosting and REEF governs everything else.
-
 PUBLIC DOMAIN (CC0-1.0)
+
+## Mapping onto REEF
+
+| REEF | HTTP |
+|---|---|
+| `GetRef` / `RefValue` | `GET <base>/refs/<name>.root` |
+| `Get` / `ObjectData` | `GET <base>/<xx>/<hash>` |
+| `GetRange` (`FEAT_RANGE`) | `GET` with `Range: bytes=a-b` |
+| `Have` / `HaveReply` | absent; the client tests locally instead |
+| `Hello` / `HelloAck` | absent; capabilities are assumed |
+| `Cancel` | closing the connection |
+| `Status.NotFound` | `404` |
+| `Status.Denied` | `403`, or `404` where existence must not leak |
+
+An origin has no session, so it has no disclosure set, and it therefore
+**serves the public domain only** as a REEF provider (REEF.md, "A static
+origin serves the public domain only"). The arrangement below, where an
+origin sits behind its own access control, remains useful but is the
+origin admitting a request before REEF is involved, not REEF enforcing a
+domain.
 
 ## Goals
 
@@ -70,21 +94,14 @@ refs:            Cache-Control: no-cache        (validate with ETag)
 ## Domains
 
 The cache policy above assumes every published object may be handed to
-anyone who asks. A deployment that also holds private state needs the
-disclosure classification described in
-[SHOAL.md](SHOAL.md) under Data domains: `local`, `server`, `client`, and
-`public`, ordered from least to most permissive.
-
-This protocol carries none of that classification in the data. A domain
-is a property of a depot, so:
+anyone who asks. The disclosure model is ATOLL.md A3; what follows is
+only what static hosting adds to it.
 
 - **One base URL per domain.** A published depot is single-domain, and
-  access control lives at the origin for that base URL. The public domain
-  is anonymous, the client domain requires client authentication, and the
-  server domain requires a federation credential.
-- **The local domain is never published.** It is protected by not
-  serving it, not by a marker in a file. Static hosting has no logic with
-  which to honour a marker.
+  any access control lives at the origin for that base URL.
+- **The local domain is never published.** It is protected by not serving
+  it, not by a marker in a file. Static hosting has no logic with which
+  to honour a marker.
 - **A pack must not span domains.** The pack transport works by byte
   range, so any client able to read one object in a pack can read every
   object in it. Mixing domains inside a pack defeats the origin's access
@@ -98,19 +115,18 @@ is a property of a depot, so:
   enumerates the topics a server publishes even when the roots themselves
   are unreadable.
 
-There is a limit worth stating plainly. This protocol answers a request
-for a bare address, which is what makes static hosting sufficient. An
-attacker holding a candidate plaintext can compute its address and ask
-whether the origin has it, turning a guess into a confirmation. For
-high-entropy content this is not reachable. For low-entropy content, such
-as a record with a known schema and a guessable identifier, it is, and
-that content should be served through an authenticated endpoint scoped to
-a topic the requester may subscribe to rather than published as static
-files. That is D13 in SHOAL.md.
+There is a limit worth stating plainly. Static hosting answers a request
+for a bare address, which is exactly what ATOLL A3.3 forbids outside the
+public domain, and it is what makes static hosting sufficient in the
+first place. An origin cannot hold a disclosure set, so putting a
+restricted depot behind origin authentication protects it from outsiders
+and not at all from anyone admitted. That is adequate for high-entropy
+content and inadequate for records with a known schema and a guessable
+identifier, which belong on a real REEF endpoint instead.
 
-Access control is a confidentiality measure only. Object integrity comes
-from content addressing and does not change, so a restricted depot is no
-more trusted than a public one (see Trust).
+Access control here is a confidentiality measure only. Object integrity
+comes from content addressing and does not change, so a restricted depot
+is no more trusted than a public one.
 
 ## The core idea
 
@@ -268,25 +284,28 @@ descendant address, and the pack index supplies the sizes.
 
 ## Trust
 
-Object integrity is self-verifying and does not depend on the transport:
+The verification rules are ATOLL.md A4, including the unresolved weakness
+around `htree` and the other re-encoded types. They apply unchanged here:
+object integrity is self-verifying and does not depend on the transport.
 
-- A `blob` or text `tree`, and a compressed object after decoding, is
-  accepted only if `BLAKE2b-256("type len\0" || plaintext)` equals the
-  address it was fetched under. A tampered or truncated object is
-  rejected.
-- An `htree` is addressed by its canonical text form, so it cannot be
-  verified by hashing its own bytes; the client validates its internal
-  adler32 and, in the packfile transport, relies on the footer checksum
-  that covers the index. This mirrors `cas_pack_import`.
+Two points are specific to this profile:
+
 - A compressed object is fetched as stored (codec tag plus payload) and
-  decoded locally; decoding requires the matching codec to be compiled
-  into the client.
+  decoded locally, so decoding requires the matching codec compiled into
+  the client.
+- In the packfile transport an `htree` additionally benefits from the
+  footer checksum covering the index, mirroring `cas_pack_import`. That
+  is a corruption check and not an integrity check, per A4.1.
 
 The one thing the client must obtain authentically is the ref: it is the
 root of the Merkle structure, so whoever controls the ref controls which
 tree the client materializes. Fetch refs over TLS from a trusted origin,
 or sign them out of band. Everything reachable from a trusted root is
 then verified by address.
+
+**This is the hole SHOAL's signed version records close** (SHOAL.md D2
+and D3), by moving the trust anchor from the serving origin to the
+publishing key. Until then, an origin serving refs is trusted.
 
 ## Atomicity, resumption, and concurrency
 

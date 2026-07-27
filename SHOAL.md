@@ -48,7 +48,7 @@ they are not one protocol.
   have, and fetch on demand.
 - Control disclosure: classify content so that private state, federation
   state, and client-visible state are not served to the wrong audience
-  (see Data domains).
+  (see ATOLL.md A3).
 
 ## Non-goals (for now)
 
@@ -246,89 +246,25 @@ them, even when it holds only part of a root's graph. This needs:
   before non-container content) so reachability is always computable and
   a child rarely arrives before its parent.
 
-### D11. Four domains, totally ordered
+### D11. Data domains live in ATOLL
 
-Every decision above assumes content that may be shared with whoever
-asks. That assumption does not survive contact with a real deployment,
-which holds session caches, credentials, user records, and player state
-alongside shareable assets. Domains are the disclosure classification
-that decides what shoal may serve to whom.
+Disclosure classification (local, server, client, public), the ordering
+that makes "more permissive" well defined, one depot per domain, and the
+rule that a bare address is never answered outside the public domain are
+foundations both protocols share. They are specified in
+[ATOLL.md](ATOLL.md) A3, and REEF implements the serving side of them
+with a disclosure set.
 
-- **local** -- private to this server. Caches, session state,
-  credentials, anything with no meaning elsewhere. Never served.
-- **server** -- shared with trusted servers in the federation. Minimal
-  user records supporting optional distributed authentication.
-- **client** -- shared with authenticated clients and with trusted
-  servers.
-- **public** -- shareable with anyone. No current use case, but naming it
-  keeps the ordering complete.
+Two consequences land in this document rather than there:
 
-Because the client domain is defined to include trusted servers, the four
-form a chain rather than a lattice:
+- **Provider indexes are per domain.** "Node N holds hash X" is a
+  disclosure, so the index of D8 is split the same way the depots are.
+- **Content routing carries the public domain only.** Combined with the
+  argument that routing is deferrable, restricted domains are served
+  through authenticated peers and direct provider hints, never through a
+  lookup that gossips what a node holds.
 
-```
-  local  <  server  <  client  <  public
-```
-
-A total order matters. It makes "more permissive" well defined, which in
-turn makes the enforcement rule in D12 a single comparison rather than a
-policy evaluation.
-
-### D12. Domains attach to roots, and depots enforce them
-
-A content address is a function of the bytes alone, so **an object cannot
-carry a domain**. Identical bytes produce one address no matter which
-domain wrote them. The classification therefore attaches to a **ref or
-topic**, and its reachable closure inherits it.
-
-Enforce this by giving each domain **its own depot**, rather than
-labelling objects inside one depot:
-
-- Which depot answered a request is a static, auditable fact. Deriving a
-  domain from graph reachability is a computation performed on every
-  serve decision, and one that gives ambiguous answers when an object is
-  reachable from roots in two domains.
-- Cross-domain dedup is itself a disclosure channel. When a write to a
-  shared depot silently succeeds as a dedup hit, the writer learns that
-  someone else already stored those bytes. Separate depots remove the
-  channel rather than mitigating it.
-- The depot lock is per depot, so separation also relieves the
-  single-lock constraint noted in the comparison above.
-
-The cost is duplicated bytes for content that legitimately belongs to
-more than one domain, which is mostly shareable assets referenced by
-restricted data. The resolver from the previous section absorbs this: a
-lookup that misses in a restricted depot may fall through to a more
-permissive one.
-
-**The enforcement rule is that resolution flows toward permissiveness and
-never back.** A client-domain request may be answered from the client or
-public depot. A public request is never answered from the server or local
-depot. One comparison against the D11 order, applied at the point where
-the peer's authenticated role selects the starting depot.
-
-### D13. Never answer a bare hash outside the public domain
-
-Content addressing lets anyone who possesses the plaintext compute its
-address. For low-entropy content such as a user record with a known
-schema and a guessable identifier, an attacker can construct candidate
-records, compute their addresses, and ask whether the server holds them.
-A serve path that answers "does this hash exist" confirms the guess, and
-enumeration follows.
-
-So restricted domains do not expose `get(hash)`. A request names a
-**topic the requester is authorized to subscribe to**, and the server
-answers only for objects within that topic's closure. Possession of an
-address grants nothing on its own. The public domain, having nothing to
-confirm, may answer bare addresses freely.
-
-The provider index of D8 needs the same treatment: "node N holds hash X"
-is a disclosure, so provider indexes are per domain. Combined with the
-argument above that content routing is deferrable, this suggests any
-future routing layer should carry the public domain only, with restricted
-domains served through authenticated peers and direct hints.
-
-### D14. Shared authentication is out of scope
+### D12. Shared authentication is out of scope
 
 Federated authentication looked like a natural fit for the topic model. A
 user's home server is the single writer of that user's record, ownership
@@ -350,24 +286,15 @@ it will be proposed again:
   fetched the latest record keeps honouring a revoked delegation.
   Bounding that window means short expiry, at which point the chain is
   carrying something that expires faster than it propagates.
-- The disclosure rules of D13 exist precisely because low-entropy records
-  are enumerable by address. User records are the worst case for this,
-  and putting them in the store means the strictest possible domain
-  policy has to be right on every path.
+- The disclosure rules of ATOLL A3.3 exist precisely because low-entropy
+  records are enumerable by address. User records are the worst case, so
+  putting them in the store means the strictest possible domain policy
+  has to be right on every path.
 - The federation this design targets is a set of player-run shards of one
   game. Home-server authorization needs no shared record at all.
 
 What remains in the server domain is ordinary federation state, not
 credentials.
-
-### Enforcement is not smolvfs's job
-
-smolvfs stores bytes and has no notion of a requester. The boundary is
-enforced entirely by which depot a request resolves against and by the
-peer authentication that selects it. A domain recorded in a file is
-documentation, not a control. The local domain in particular is protected
-by never publishing it, not by a flag, because a static origin has no
-logic with which to honour one.
 
 ## Required smolvfs changes
 
@@ -380,9 +307,12 @@ Most of shoal is above smolvfs. The base needs:
   import / pack as a re-encoded type.
 - Confirm `valid_ref_name` accepts `server-id/topic` (a `/` in the name)
   or define an encoding.
-- Per-domain depots (D12) mean a process holds several `struct cas` at
-  once. Each takes its own depot lock, which is already supported, but
-  the resolver needs a defined order and a fall-through rule.
+- Per-domain depots (ATOLL A3.2) mean a process holds several `struct
+  cas` at once. Each takes its own depot lock, which is already
+  supported, but the resolver needs a defined order and a fall-through
+  rule.
+- A staging area inside each depot for partial transfers (ATOLL A4.2),
+  swept by the same grace period the collector already applies.
 - A miss in one depot must be answerable from another without copying
   the object back, or with an explicit promote step. Decide which.
 
@@ -532,15 +462,10 @@ problems.
 - **Manifest shape in v1.** Include per-chunk lengths for ranged reads
   from the start (cheap now, hard to retrofit); single-level vs
   multi-level threshold.
-- **Promoting content between domains.** Publishing an asset from client
-  to public is a copy under D12. Whether that copy is explicit, whether
-  it is reversible, and what happens to content already disclosed under
-  the wider domain all need answers.
-- **Domain of a chunk.** A chunked manifest in a restricted domain
-  references chunks that may be identical to public ones. Deduplicating
-  across that boundary reintroduces the confirmation attack of D13, so
-  the safe default is not to, at the cost of storing popular chunks
-  twice.
+
+Domain questions (promotion between classes, whether a chunk may dedup
+across a class boundary) are recorded in ATOLL.md, which owns the domain
+model.
 
 ## Prior art referenced
 
