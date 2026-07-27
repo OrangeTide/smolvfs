@@ -156,6 +156,10 @@ inject.
 | Provider retires a request by timeout mid-transfer | Requester frees the id only after `Cancelled` |
 | Requester cancels one of several in-flight requests | The others complete undisturbed |
 | Provider changes `total` between replies for one address | Session fails rather than assembling a mixture |
+| Provider serves an htree whose tables point past its records | Rejected by byte pinning, not merely by the entry set (ATOLL A4.1) |
+| Provider serves a directory with a duplicate name | Rejected before any entry is returned, so a listing and a lookup cannot disagree |
+| Provider serves a name containing an overlong `C0 AF` | Rejected as malformed UTF-8, so no separator reaches the caller (ATOLL A4.3) |
+| Provider serves a non-canonically spelled text tree | Rejected by verification, though it hashes to its own address |
 
 The disclosure-set rows matter most, because they are the only thing
 standing between a restricted domain and enumeration, and they are easy

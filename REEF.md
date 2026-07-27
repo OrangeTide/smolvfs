@@ -290,6 +290,11 @@ stays 32-bit because no single reply approaches 4 GiB.
   protocol violation (ATOLL A7.4), never a success.
 - A requester verifies every object against the address it asked for
   before committing it, and stages partial transfers per ATOLL A4.2.
+- A directory object carries checks beyond its address: the canonical
+  form rules of ATOLL A4.3, and for an `htree` the byte pinning of A4.1.
+  A requester that walks a tree it has not checked this way is trusting
+  the provider for the child addresses it descends into, which is the one
+  thing the design does not permit.
 
 ### Have and undisclosed addresses
 

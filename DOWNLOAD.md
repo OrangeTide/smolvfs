@@ -292,6 +292,10 @@ Three points are specific to this profile:
 - A compressed object is fetched as stored (codec tag plus payload) and
   decoded locally, so decoding requires the matching codec compiled into
   the client.
+- A directory object of either encoding must satisfy the canonical form
+  rules of ATOLL A4.3, names being well-formed UTF-8 and entries strictly
+  ascending. A client walking a fetched tree reads child addresses out of
+  it, so relaxing this means descending on the origin's word.
 - An `htree` is class 3, so a client must run both checks of A4.1:
   reconstruct the canonical `tree` text and hash it against the address,
   then re-derive the htree and compare bytes. A client that stops at the

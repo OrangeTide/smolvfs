@@ -177,6 +177,49 @@ large content (SHOAL D9), because then each chunk is independently
 addressed, independently verifiable, and small enough to hold in memory,
 and a partially fetched file is simply a manifest with chunks missing.
 
+### A4.3. The canonical form is enforced, not assumed
+
+Class 3 verification works by re-deriving the stored form, so it is only
+as strong as the canonical form being genuinely canonical. For directory
+objects that means two rules, specified in [FORMAT.md](FORMAT.md) and
+checked by a reader rather than trusted:
+
+- **Names are well-formed UTF-8**, rejecting overlong sequences,
+  surrogates, and anything past U+10FFFF. Overlong forms are the reason
+  this is enforced at read time and not only at write time: `C0 AF` is
+  not the octet `0x2F`, so it passes a test for `/` while decoding to
+  U+002F in a consumer less strict than the producer. A requester that
+  relaxes this hands its caller a path separator that its own checks
+  never saw.
+- **Entries are strictly ascending by name in unsigned octet order**,
+  which for well-formed UTF-8 is also codepoint order. Strictness is what
+  forbids duplicate names, and a duplicate is not cosmetic: two entries
+  under one name let a listing and a lookup disagree about which child
+  that name has, which is the divergence A4.1's byte pinning exists to
+  catch, arriving through the entry set instead of the encoding.
+
+A provider serving a directory object that breaks either rule is serving
+a malformed object, and the requester rejects it rather than repairing
+it.
+
+### A4.4. Normalization is a producer's problem
+
+Unicode normalization is **not** performed. NFC requires tables smolvfs
+will not carry, so names differing only by normalization are distinct
+entries with distinct addresses even when they render identically.
+
+This has a federation cost worth stating plainly. Two members storing the
+same asset directory from platforms that disagree by default, macOS
+decomposing where Linux does not, produce different addresses for that
+directory and for every ancestor of it, and the two copies never dedup.
+Nothing in either protocol detects this, because both copies are
+internally consistent and correctly addressed.
+
+The fix belongs in the content pipeline: normalize names before storing
+them. A federation that shares assets should settle on one form and apply
+it at publish time rather than discovering the divergence as a dedup
+miss.
+
 ## A5. The transport contract
 
 Both protocols are defined over **messages**. A transport is usable if it
