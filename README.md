@@ -360,6 +360,23 @@ defines `SMOLVFS_VERSION_MAJOR/MINOR/PATCH` and composes
 `SMOLVFS_VERSION` (`"MAJOR.MINOR.PATCH"`) from them, so vendored source
 is identifiable from that one header, and `castool -V` prints it.
 
+#### Incompatible change since 0.2.0
+
+Directory entry names must now be **well-formed UTF-8**. Through 0.2.0 a
+name was any octet string apart from `/`, `\n`, and NUL.
+
+A directory written by an earlier version that holds a name which is not
+valid UTF-8 no longer loads, and `castool` refuses to add a file whose
+basename is not valid UTF-8. No such depot is known to exist, and there
+is no conversion tool: choosing replacement names is a decision for the
+producer, not the library.
+
+The rule is enforced on read as well as write, which is what makes it a
+break. It has to be. An overlong sequence encodes `/` in octets that are
+not `0x2F`, so it slips past a separator test here and decodes to a
+separator in any consumer less strict. See
+[FORMAT.md](FORMAT.md) under "Status and versioning" for the full note.
+
 To cut a release, bump the numbers in `version.h`, commit, and tag the
 commit `v<MAJOR>.<MINOR>.<PATCH>` (for example `v0.1.0`). The `Release`
 GitHub Actions workflow triggers on any `v*` tag and fails if the tag's

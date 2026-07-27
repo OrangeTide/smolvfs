@@ -20,6 +20,39 @@ reader identifies a structure by its magic before interpreting any
 other field and rejects unknown versions. There is no separate global
 format-version number; each structure is versioned independently.
 
+### Incompatible change: entry names must be UTF-8
+
+**Directory entry names are now required to be well-formed UTF-8** (see
+"Entry names"). Through smolvfs 0.2.0 a name was any octet string apart
+from `/`, `\n`, and NUL, so this narrows what a valid directory may
+contain and is not backward compatible.
+
+What breaks:
+
+- A directory object written by an earlier version and containing a name
+  that is not valid UTF-8 no longer loads. The failure is a clean
+  rejection of the whole object, not a partial read.
+- `castool` refuses to add a file whose basename is not valid UTF-8. On
+  Linux a filename is an arbitrary byte string, so this is reachable from
+  ordinary use rather than only from a crafted depot.
+
+No such depot is known to exist. The change is taken deliberately anyway,
+because the rule cannot be relaxed on the read path without giving up the
+protection it exists for: an overlong sequence encodes `/` in octets that
+are not `0x2F`, so it passes a separator test here and decodes to a
+separator in any consumer less strict. A name that is a path separator on
+arrival but not on inspection is worth an incompatible change to
+foreclose.
+
+There is no conversion tool. A depot holding such a name must be
+rewritten by re-importing its content with names the producer has made
+valid, which is a decision about what those names should be and not one a
+library can make.
+
+The htree layout tightening that landed alongside this is *not* a break:
+every htree this implementation has ever written already satisfies it.
+Only the name rule is incompatible.
+
 ## Conventions
 
 - **Byte order.** Every multi-byte integer in a binary structure is
@@ -229,7 +262,9 @@ apply to both, and a reader enforces them rather than assuming them.
 
 A name is between 1 and 255 octets and must not contain `/`, `\n`, or
 NUL. It must also be **well-formed UTF-8**, rejecting the three things a
-lenient decoder would accept:
+lenient decoder would accept. This last requirement is newer than the
+others and is not backward compatible; see "Incompatible change: entry
+names must be UTF-8" above.
 
 - an **overlong** sequence, encoding a codepoint in more octets than it
   needs;
