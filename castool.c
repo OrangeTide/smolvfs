@@ -1066,6 +1066,9 @@ print_topic_names(const unsigned char pk[CAS_SIGN_PUBKEY_LEN],
 	printf("public-key %s\n", pkhex);
 	if (cas_topic_ref_name(refname, sizeof(refname), id, label) == CAS_OK)
 		printf("ref        %s\n", refname);
+	else
+		fprintf(stderr, "%s: label '%s' is not usable in a ref name\n",
+		        progname, label ? label : "");
 }
 
 static int
@@ -1123,12 +1126,16 @@ cmd_publish(struct cas_tree *ct, int argc, char **argv)
 {
 	const char *label = NULL;
 
-	while (argc > 0 && argv[0][0] == '-' && argv[0][1] == 'l') {
-		if (argc < 2)
-			break;
-		label = argv[1];
-		argc -= 2;
-		argv += 2;
+	while (argc > 0 && argv[0][0] == '-') {
+		if (strcmp(argv[0], "-l") == 0 && argc >= 2) {
+			label = argv[1];
+			argc -= 2;
+			argv += 2;
+			continue;
+		}
+		fprintf(stderr, "%s: publish: unknown option '%s'\n",
+		        progname, argv[0]);
+		return 1;
 	}
 
 	if (argc < 2) {
@@ -1176,6 +1183,25 @@ cmd_publish(struct cas_tree *ct, int argc, char **argv)
 	} else {
 		fprintf(stderr, "%s: head: %s\n", progname,
 		        cas_sign_strerror(rc));
+		memset(sk, 0, sizeof(sk));
+		return 1;
+	}
+
+	/* A publisher signs what it has.  Signing a root this depot does
+	 * not hold produces a topic that verifies perfectly and resolves
+	 * to nothing, and the subscriber discovers it, not the publisher.
+	 * The library allows it, because a record naming an object a node
+	 * has not fetched is exactly what lazy fetch looks like; a person
+	 * running publish almost never means it. */
+	if (!cas_valid_hash(argv[1])) {
+		fprintf(stderr, "%s: '%s' is not a hash\n", progname,
+		        argv[1]);
+		memset(sk, 0, sizeof(sk));
+		return 1;
+	}
+	if (!cas_exists(cas_tree_cas(ct), argv[1])) {
+		fprintf(stderr, "%s: root %s is not in this depot\n",
+		        progname, argv[1]);
 		memset(sk, 0, sizeof(sk));
 		return 1;
 	}

@@ -345,6 +345,19 @@ cas_vchain_walk(struct cas *store, const char *head_addr,
  * Key files
  ****************************************************************/
 
+/* memset on a buffer whose lifetime is ending is a dead store, and a
+ * compiler may drop it.  It happens to survive here at -O2, which is
+ * not a guarantee worth resting a secret on.  Volatile stores are
+ * observable, so these cannot be elided. */
+static void
+wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+
+    while (n--)
+        *v++ = 0;
+}
+
 static int
 read_entropy(unsigned char *out, size_t len)
 {
@@ -377,15 +390,15 @@ cas_sign_key_generate(const char *path,
 
     rc = cas_sign_key_pair(sk, pk, seed);
     if (rc != CAS_OK) {
-        memset(seed, 0, sizeof(seed));
+        wipe(seed, sizeof(seed));
         return rc;
     }
 
     char hex[CAS_HASH_HEX + 1];
 
     cas_hex_encode(seed, sizeof(seed), hex);
-    memset(seed, 0, sizeof(seed));
-    memset(sk, 0, sizeof(sk));
+    wipe(seed, sizeof(seed));
+    wipe(sk, sizeof(sk));
 
     /* O_EXCL so an existing key is never replaced by accident, and 0600
      * from the start rather than chmod afterwards, which would leave a
@@ -395,7 +408,7 @@ cas_sign_key_generate(const char *path,
     if (fd < 0) {
         int err = errno == EEXIST ? CAS_SIGN_EKEYEXISTS : CAS_EIO;
 
-        memset(hex, 0, sizeof(hex));
+        wipe(hex, sizeof(hex));
         return err;
     }
 
@@ -403,17 +416,17 @@ cas_sign_key_generate(const char *path,
     int n = snprintf(buf, sizeof(buf), "%s\n%s\n",
                      CAS_SIGN_KEY_MAGIC, hex);
 
-    memset(hex, 0, sizeof(hex));
+    wipe(hex, sizeof(hex));
     if (n < 0 || (size_t)n >= sizeof(buf)) {
         close(fd);
         unlink(path);
-        memset(buf, 0, sizeof(buf));
+        wipe(buf, sizeof(buf));
         return CAS_ERR;
     }
 
     ssize_t w = write(fd, buf, (size_t)n);
 
-    memset(buf, 0, sizeof(buf));
+    wipe(buf, sizeof(buf));
     if (w != n || fsync(fd) != 0) {
         close(fd);
         unlink(path);
@@ -471,15 +484,15 @@ cas_sign_key_load(const char *path,
     unsigned char seed[CAS_SIGN_SEED_LEN];
 
     if (cas_hex_decode(hex, CAS_HASH_HEX, seed, sizeof(seed)) != 0) {
-        memset(seed, 0, sizeof(seed));
+        wipe(seed, sizeof(seed));
         goto out;
     }
 
     rc = cas_sign_key_pair(sk, pk, seed);
-    memset(seed, 0, sizeof(seed));
+    wipe(seed, sizeof(seed));
 
 out:
-    memset(hex, 0, sizeof(hex));
+    wipe(hex, sizeof(hex));
     fclose(fp);
     return rc;
 }

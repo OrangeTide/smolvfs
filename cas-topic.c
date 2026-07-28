@@ -92,9 +92,15 @@ cas_topic_head(struct cas_tree *ct, const char *refname,
         return rc;
 
     /* The ref names a record, never a root, so every resolution of a
-     * topic passes through a signature check.  Verifying here rather
-     * than trusting the local ref costs one check and removes the
-     * question of whether the depot was tampered with since. */
+     * topic passes through a signature check.
+     *
+     * This is a deliberate exception to ATOLL A4.0, which says an object
+     * already in the depot is trusted and that re-checking on read buys
+     * nothing against an adversary who never got past admission.  That
+     * reasoning holds, and the check stays anyway: a head record's
+     * entire value is its signature, it is read rarely, and one
+     * verification is cheap.  It is defence in depth, not distrust of
+     * the depot, and it does not replace what fsck answers. */
     rc = load_record(ct, addr, out);
     if (rc != CAS_OK)
         return rc;

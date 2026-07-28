@@ -312,9 +312,11 @@ tree the client materializes. Fetch refs over TLS from a trusted origin,
 or sign them out of band. Everything reachable from a trusted root is
 then verified by address.
 
-**This is the hole SHOAL's signed version records close** (SHOAL.md D2
-and D3), by moving the trust anchor from the serving origin to the
-publishing key. Until then, an origin serving refs is trusted.
+**Signed version records close this hole**, by moving the trust anchor
+from the serving origin to the publishing key (SHOAL.md D2 and D3,
+implemented in `cas-topic.h`). A client that resolves a topic through a
+signed record rather than a bare `.root` file does not have to trust the
+origin at all. A client that fetches a plain ref still does.
 
 ## Atomicity, resumption, and concurrency
 
