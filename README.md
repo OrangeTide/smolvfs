@@ -351,6 +351,7 @@ make clean-all    # remove objects, binary, and dependency files
 make test         # run test.sh (if present)
 make run          # build and run smolvfs
 make version      # print the library version from version.h
+make MONOCYPHER=1 # build with the bundled EdDSA-BLAKE2b signer
 make analyze      # rebuild under gcc -fanalyzer
 make sanitize     # rebuild and run the suite under ASan and UBSan
 ```

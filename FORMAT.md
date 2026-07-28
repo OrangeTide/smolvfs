@@ -468,6 +468,69 @@ sound when it arrived, but whether it still is. Bit rot, a truncated
 write, and a tamper below the library are invisible to both of the
 first two.
 
+## Version record (`vrec`)
+
+A ref is a mutable pointer, so whoever serves one decides what a client
+materializes. A version record moves that authority to the publisher: it
+names a root, is signed by the key its topic is named after, and
+verifies without a registry or a connection to anyone.
+
+The record is an ordinary self-addressed object. Its address is
+`BLAKE2b-256("vrec 216\0" || record)`, and it verifies by hashing its own
+bytes like any raw object. Nothing here is re-encoded.
+
+Fixed width, 216 bytes, all integers little-endian. A fixed layout means
+exactly one encoding per record, so the canonical-form questions that
+apply to directories do not arise here.
+
+```
+offset  size  field
+     0     4  "VRv1"      magic and format version
+     4     4  reserved, must be zero
+     8    32  topic_id    BLAKE2b-256 of the 32 public key bytes
+    40    32  pubkey      signing public key
+    72     8  seq         u64, strictly increasing within a topic
+    80     8  timestamp   i64, seconds; informational only
+    88    32  root        address this record publishes
+   120    32  prev        previous record's address, 32 zero bytes if none
+   152    64  signature   over bytes [0, 152)
+```
+
+`topic_id` is the hash of the bare key bytes, with none of the
+`"type len\0"` framing an object address carries. Keeping the two
+derivations distinct means a record can never collide with the identity
+it belongs to.
+
+### Signature scheme
+
+**EdDSA over curve25519 with BLAKE2b**, per monocypher's `crypto_eddsa_*`
+family, which is the normative reference.
+
+This is *not* RFC 8032 Ed25519. That is the same construction with
+SHA-512, and a signature produced by one will not verify under the other.
+The substitution keeps BLAKE2b as the only hash primitive in the system,
+which every object address already depends on. An implementation
+elsewhere replaces SHA-512 with BLAKE2b-512 throughout the Ed25519
+construction.
+
+### Verifying a record
+
+In order, because the answers mean different things:
+
+1. **Length and magic**, and the reserved word is zero. The reserved
+   bytes sit inside the signed prefix, so a signer could otherwise set
+   them and a reader that ignored them would accept content this format
+   has not defined.
+2. **`topic_id == BLAKE2b-256(pubkey)`.** This is the binding that makes
+   the name self-certifying. A failure here is the wrong identity, not a
+   broken signature, and a caller deciding whether to trust a publisher
+   needs to tell them apart.
+3. **The signature** over bytes `[0, 152)` under `pubkey`.
+
+Sequence monotonicity and the `prev` chain are checked against a known
+previous head, which is a question about two records rather than one, and
+belongs a layer above this.
+
 ## Object map
 
 The sparse numeric-id-to-hash object map is a separate CAS object type

@@ -8,7 +8,7 @@ SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(SRCS:.c=.dep)
 LIB := libvfs.a
-LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c
+LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c cas-sign.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 DEPS += $(LIBSRCS:.c=.dep)
 
@@ -26,7 +26,16 @@ TOOL_SRCS := castool.c
 TOOL_OBJS := $(TOOL_SRCS:.c=.o)
 DEPS += $(TOOL_SRCS:.c=.dep)
 
-TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c
+# Optional bundled signature backend (monocypher).  Build with
+# MONOCYPHER=1 to compile the EdDSA-BLAKE2b signer used by cas-sign.
+# Without it, cas-sign parses records but reports CAS_SIGN_ENOBACKEND
+# rather than verifying them.
+ifdef MONOCYPHER
+CPPFLAGS += -DCAS_WITH_MONOCYPHER
+SIGN_OBJS := cas-sign-monocypher.o third_party/monocypher.o
+endif
+
+TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c test_cas_sign.c
 TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 DEPS += $(TEST_SRCS:.c=.dep)
@@ -67,6 +76,12 @@ cas-codec.o : cas-codec.c
 	$(compile.c)
 cas-codec-miniz.o : cas-codec-miniz.c
 	$(compile.c)
+cas-sign-monocypher.o : cas-sign-monocypher.c
+	$(compile.c)
+third_party/monocypher.o : third_party/monocypher.c
+	$(compile.c)
+test_cas_sign: test_cas_sign.o cas-sign.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 third_party/miniz.o : third_party/miniz.c
 	$(CC) -c -o $@ -MMD -MF $(@:.o=.dep) -O2 $(CPPFLAGS) $<
 test_cas_codec: test_cas_codec.o cas-codec.o $(MINIZ_OBJS)
@@ -110,9 +125,10 @@ version:
 	  "$$(sed -n 's/^#define SMOLVFS_VERSION_MINOR[[:space:]]*//p' version.h)" \
 	  "$$(sed -n 's/^#define SMOLVFS_VERSION_PATCH[[:space:]]*//p' version.h)"
 clean:
-	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) $(TOOL_OBJS) cas-codec-miniz.o third_party/miniz.o
+	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) $(TOOL_OBJS) cas-codec-miniz.o third_party/miniz.o \
+	  cas-sign-monocypher.o third_party/monocypher.o
 clean-all: clean
-	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep
+	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep third_party/monocypher.dep
 test: $(TEST_BINS)
 	./test.sh
 smoke: $(TEST_BINS)

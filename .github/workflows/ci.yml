@@ -25,6 +25,13 @@ jobs:
           make all
           make cas-fetch
 
+      # The default build compiles no signing backend, so the suite would
+      # otherwise only ever exercise the cannot-verify path.
+      - name: Test with the optional backends
+        run: |
+          make clean-all
+          make MONOCYPHER=1 MINIZ=1 test
+
       - name: Generate coverage data
         run: |
           lcov --capture --directory . --output-file coverage.info

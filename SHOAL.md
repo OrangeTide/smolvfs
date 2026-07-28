@@ -143,9 +143,21 @@ is just the current-head cache.
 
 ### D5. Signing and key management
 
-Ed25519 (small, deterministic, vendorable public-domain implementation,
-matching smolvfs's bundle-or-BYO pattern). All signing lives above
-smolvfs, which only stores the bytes. Self-certifying ids remove most of
+**EdDSA over curve25519 with BLAKE2b**, as monocypher implements it,
+bundled behind `MONOCYPHER=1` in the pattern smolvfs already uses for
+codecs. Implemented; see `cas-sign.h` and FORMAT.md "Version record".
+
+This is deliberately *not* RFC 8032 Ed25519, which is the same
+construction with SHA-512. The trade is one hash primitive in the whole
+system, since every address is BLAKE2b already, against interoperability
+with stock Ed25519 libraries. An implementation in another language
+substitutes BLAKE2b-512 for SHA-512 throughout, which is a far easier
+thing to do in Go or Rust than in C, and monocypher is the normative
+reference. Earlier drafts of this section said "Ed25519" and were wrong
+about the hash.
+
+All signing lives above smolvfs, which only stores the bytes.
+Self-certifying ids remove most of
 the key-distribution problem for topic authenticity. TLS-peer vouching
 and any "voting keys in" apply only to two narrower, separable concerns:
 admission (who is in the confederation -- a consensus/quorum problem,
