@@ -161,12 +161,26 @@ The policy has three parts, and all three are needed:
    detect these and a trusting read will not either.
 
 The boundary has to be a real place in the code, not a convention. In
-smolvfs it is `cas_tree_put_checked`, and the unchecked primitive beneath
-it, `cas_put_object_at`, writes bytes at whatever address the caller
-names and verifies nothing. A REEF requester commits through the checked
-call. Anything reaching for the primitive is asserting it has already
-verified, and is where to look first when something malformed turns up in
-a depot.
+smolvfs it is three places, one per way an object can arrive:
+
+| Path | Enforced by |
+|---|---|
+| Caller holds the plaintext | `cas_tree_put_checked` |
+| Bundle import | `cas_pack_import`, given `cas_tree_check_object` |
+| Fetched loose object written verbatim | `cas_tree_verify` after the write, removing the file if it fails |
+
+All three run the same checks; they differ only in what they have in hand
+when they run them. `cas_tree_check_object` is the shared core, factored
+out so it can be passed across a module boundary that a direct call could
+not cross.
+
+Beneath all of them is `cas_put_object_at`, which writes bytes at
+whatever address the caller names and verifies nothing. It is the
+unchecked primitive, and reaching for it is an assertion that the caller
+has already verified. It is also the first place to look when something
+malformed turns up in a depot.
+
+A REEF requester commits through one of the three, never the primitive.
 
 ### A4.1. Three encoding classes, and no fourth
 

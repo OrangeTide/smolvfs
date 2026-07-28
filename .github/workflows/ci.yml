@@ -11,11 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lcov
-        run: sudo apt-get install -y lcov
+      - name: Install dependencies
+        run: sudo apt-get install -y lcov libcurl4-openssl-dev
 
       - name: Build and test with coverage
         run: make CFLAGS="-Wall -Wextra -g -Og --coverage" test
+
+      # The suite links only the test binaries, so a break in castool or
+      # in the reference client would otherwise reach a release unbuilt.
+      - name: Build the tools
+        run: |
+          make clean-all
+          make all
+          make cas-fetch
 
       - name: Generate coverage data
         run: |
@@ -27,3 +35,24 @@ jobs:
         with:
           file: coverage.info
           format: lcov
+
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y libcurl4-openssl-dev
+
+      # Expected clean.  One known false positive is suppressed at its
+      # site in cas-omap.c with the reasoning written down.
+      - name: gcc -fanalyzer
+        run: make analyze
+
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ASan and UBSan
+        run: make sanitize

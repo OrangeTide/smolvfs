@@ -1634,12 +1634,20 @@ cas_tree_put_checked(struct cas_tree *ct, const char *type,
                      const void *data, size_t len, const char *hash);
 ```
 
-Store an object obtained from outside, checking it first.  **This is the
-trust boundary.**  Objects are validated as they enter the depot and
-trusted when read, so use this for anything a peer, an origin, or a user
-supplied.  `cas_put_object_at` is the unchecked primitive underneath: it
-writes bytes at whatever address the caller names and verifies nothing,
-so only a caller that has already verified may use it.
+Store an object obtained from outside, checking it first.  Objects are
+validated as they enter the depot and trusted when read, so use this for
+anything a peer, an origin, or a user supplied.
+
+This is one of three points where that boundary is enforced, differing
+only in what each has in hand.  Use this one when you hold the plaintext.
+Bundle import goes through `cas_pack_import` with `cas_tree_check_object`
+as its verifier, and a client that writes a fetched loose object verbatim
+calls `cas_tree_verify` afterwards and removes the file if it fails.
+`cas_tree_check_object` is the shared core of all three.
+
+`cas_put_object_at` is the unchecked primitive underneath: it writes
+bytes at whatever address the caller names and verifies nothing, so only
+a caller that has already verified may use it.
 
 An `htree` gets both checks of `cas_tree_verify`.  A `tree` must hash to
 `hash` and be canonical.  Any other type must hash to `hash`.

@@ -24,6 +24,12 @@ TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 DEPS += $(TEST_SRCS:.c=.dep)
 compile.c = $(CC) -c -o $@ -MMD -MF $(@:.o=.dep) $(CFLAGS) $(CPPFLAGS) $<
+
+## Default target.  cas-fetch is deliberately absent: it needs libcurl,
+## which not every build host has.  Build it explicitly, or run CI, which
+## does.
+all: smolvfs castool $(LIB)
+
 smolvfs: $(OBJS) $(LIB) $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
 	$(OBJCOPY) --only-keep-debug $@ $@.debug
