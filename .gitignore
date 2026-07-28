@@ -12,6 +12,7 @@ test_cas_pack
 test_vfs
 test_cas_tree
 test_cas_sign
+test_cas_topic
 test_vfs_snap
 castool
 cas-fetch

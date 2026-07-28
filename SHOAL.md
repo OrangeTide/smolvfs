@@ -133,11 +133,25 @@ its signature and monotonicity.
 
 ### D4. Head cache reuses smolvfs local refs
 
-A node stores the current head per topic in a local smolvfs ref (name =
-`topic`, value = head-record hash). The existing `.root` / `.log` /
-`.prev` machinery then provides the local head, an update log, and
-crash-recovery rollback for free. (Implementation note: `server-id/topic`
-contains a `/`; confirm `valid_ref_name` accepts it, or encode the id.)
+A node stores the current head per topic in a local smolvfs ref, value =
+head-record hash. The existing `.root` / `.log` / `.prev` machinery then
+provides the local head, an update log, and crash-recovery rollback for
+free. Implemented; see `cas-topic.h`.
+
+The ref holds the address of the head **record**, never of the root, so
+every resolution of a topic passes through a signature check and no path
+reaches a root without one.
+
+The naming question is settled by encoding rather than by hierarchy.
+`server-id/topic` cannot be a ref name: `valid_ref_name` rejects `/` and
+`\` outright, refs are flat files under `refs/`, and enumeration does not
+descend. Allowing a separator would mean relaxing the one validator whose
+rule is "no separators, ever", teaching ref writes to create directories,
+and making enumeration recursive. A path validator that refuses every
+separator is worth more than the hierarchy is, so the two halves become
+one flat name, `<64 hex topic id>[-<label>]`, with the id leading so two
+publishers who pick the same label cannot collide locally.
+
 The immutable version chain is the network-shared history; the local ref
 is just the current-head cache.
 

@@ -8,7 +8,7 @@ SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(SRCS:.c=.dep)
 LIB := libvfs.a
-LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c cas-sign.c
+LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c cas-sign.c cas-topic.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 DEPS += $(LIBSRCS:.c=.dep)
 
@@ -35,7 +35,7 @@ CPPFLAGS += -DCAS_WITH_MONOCYPHER
 SIGN_OBJS := cas-sign-monocypher.o third_party/monocypher.o
 endif
 
-TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c test_cas_sign.c
+TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c test_cas_sign.c test_cas_topic.c
 TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 DEPS += $(TEST_SRCS:.c=.dep)
@@ -81,6 +81,8 @@ cas-sign-monocypher.o : cas-sign-monocypher.c
 third_party/monocypher.o : third_party/monocypher.c
 	$(compile.c)
 test_cas_sign: test_cas_sign.o cas-sign.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
+test_cas_topic: test_cas_topic.o cas-topic.o cas-sign.o cas-tree.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 third_party/miniz.o : third_party/miniz.c
 	$(CC) -c -o $@ -MMD -MF $(@:.o=.dep) -O2 $(CPPFLAGS) $<
