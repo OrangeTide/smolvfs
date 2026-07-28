@@ -549,8 +549,10 @@ test_fsck_corrupt_blob(void)
 	FILE *fp = fopen(path, "a");
 
 	ASSERT(fp != NULL);
-	fputc('X', fp);
-	fclose(fp);
+	if (fp) {
+		fputc('X', fp);
+		fclose(fp);
+	}
 
 	struct tree_fsck_result r = {0};
 
@@ -1185,8 +1187,10 @@ test_log_truncated(void)
 	FILE *fp = fopen(logpath, "a");
 
 	ASSERT(fp != NULL);
-	fprintf(fp, "%s 999 0 partial", hash);
-	fclose(fp);
+	if (fp) {
+		fprintf(fp, "%s 999 0 partial", hash);
+		fclose(fp);
+	}
 
 	/* log_read should return the one good entry, skip the truncated one */
 	log_count = 0;

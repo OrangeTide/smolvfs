@@ -106,6 +106,18 @@ smoke: $(TEST_BINS)
 	./test.sh
 run: smolvfs
 	./smolvfs
+## Build everything under gcc's static analyzer.  Expected to be clean;
+## the one known false positive is suppressed at its site in cas-omap.c
+## with a comment saying why.
+analyze: clean-all
+	$(MAKE) CFLAGS="-Wall -Wextra -O1 -fanalyzer" $(TEST_BINS) castool cas-fetch
+
+## Build everything with the address and undefined-behaviour sanitizers
+## and run the suite under them.
+sanitize: clean-all
+	$(MAKE) CFLAGS="-Wall -Wextra -g -O1 -fsanitize=address,undefined \
+	    -fno-omit-frame-pointer" test
+
 coverage: clean-all coverage-clean
 	$(MAKE) CFLAGS="$(CFLAGS) --coverage" test
 	lcov --capture --directory . --output-file coverage.info
@@ -115,5 +127,6 @@ coverage: clean-all coverage-clean
 coverage-clean:
 	$(RM) -r coverage-html coverage.info *.gcda *.gcno
 
-.PHONY: all clean clean-all test smoke run coverage coverage-clean version
+.PHONY: all clean clean-all test smoke run coverage coverage-clean version \
+	analyze sanitize
 -include $(DEPS)

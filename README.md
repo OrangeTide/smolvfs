@@ -351,7 +351,15 @@ make clean-all    # remove objects, binary, and dependency files
 make test         # run test.sh (if present)
 make run          # build and run smolvfs
 make version      # print the library version from version.h
+make analyze      # rebuild under gcc -fanalyzer
+make sanitize     # rebuild and run the suite under ASan and UBSan
 ```
+
+`make analyze` and `make sanitize` are both expected to be clean, and
+both are worth running before cutting a release.  The analyzer has one
+suppressed false positive, at its site in `cas-omap.c` with a comment
+explaining why: ownership of a page escapes into a caller-owned struct
+field, which the analyzer cannot follow.
 
 ### Versioning
 
