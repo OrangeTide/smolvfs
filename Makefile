@@ -19,6 +19,13 @@ CPPFLAGS += -DCAS_WITH_MINIZ -DMINIZ_NO_STDIO
 MINIZ_OBJS := cas-codec-miniz.o third_party/miniz.o
 endif
 
+# Tool sources build to .o and so need the same clean and dependency
+# tracking the library gets.  Without the .dep here, a change to
+# version.h left a stale castool.o reporting the previous release.
+TOOL_SRCS := castool.c
+TOOL_OBJS := $(TOOL_SRCS:.c=.o)
+DEPS += $(TOOL_SRCS:.c=.dep)
+
 TEST_SRCS = test_cas.c test_cas_codec.c test_vfs.c test_cas_tree.c test_cas_pack.c test_cas_omap.c test_vfs_snap.c
 TEST_BINS = $(TEST_SRCS:.c=)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
@@ -103,7 +110,7 @@ version:
 	  "$$(sed -n 's/^#define SMOLVFS_VERSION_MINOR[[:space:]]*//p' version.h)" \
 	  "$$(sed -n 's/^#define SMOLVFS_VERSION_PATCH[[:space:]]*//p' version.h)"
 clean:
-	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) cas-codec-miniz.o third_party/miniz.o
+	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) $(TOOL_OBJS) cas-codec-miniz.o third_party/miniz.o
 clean-all: clean
 	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep
 test: $(TEST_BINS)
