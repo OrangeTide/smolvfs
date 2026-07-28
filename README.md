@@ -366,6 +366,12 @@ make analyze      # rebuild under gcc -fanalyzer
 make sanitize     # rebuild and run the suite under ASan and UBSan
 ```
 
+Switching an option such as `MINIZ=1` or `MONOCYPHER=1`, or changing
+`CFLAGS`, rebuilds what it affects: a `.config-stamp` records the
+configuration and every object depends on it, so a flag change is an
+ordinary out-of-date file rather than something make cannot see.  A
+build that changes nothing still does nothing.
+
 `make analyze` and `make sanitize` are both expected to be clean, and
 both are worth running before cutting a release.  The analyzer has one
 suppressed false positive, at its site in `cas-omap.c` with a comment

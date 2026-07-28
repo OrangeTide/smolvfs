@@ -41,6 +41,33 @@ TEST_OBJS = $(TEST_SRCS:.c=.o)
 DEPS += $(TEST_SRCS:.c=.dep)
 compile.c = $(CC) -c -o $@ -MMD -MF $(@:.o=.dep) $(CFLAGS) $(CPPFLAGS) $<
 
+# Configuration stamp.
+#
+# make tracks files, not flags, so `make MONOCYPHER=1` after a plain
+# build relinked stale objects and the feature quietly was not there.
+# The same held for MINIZ, and for switching optimisation or
+# sanitizers.  Recording the configuration in a file every object
+# depends on turns a flag change into an ordinary out-of-date file.
+#
+# The recipe runs every build, but cmp means the stamp's timestamp only
+# moves when the configuration actually changed, so a no-op build stays
+# a no-op instead of rebuilding the world.
+CONFIG_SIG := MINIZ=$(if $(MINIZ),1,0) MONOCYPHER=$(if $(MONOCYPHER),1,0) \
+              CC=$(CC) CFLAGS=$(CFLAGS) CPPFLAGS=$(CPPFLAGS)
+
+.config-stamp: FORCE
+	@printf '%s\n' "$(CONFIG_SIG)" > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@$(RM) $@.tmp
+
+FORCE:
+
+ALL_OBJS := $(OBJS) $(LIBOBJS) $(TOOL_OBJS) $(TEST_OBJS) \
+            cas-codec-miniz.o third_party/miniz.o \
+            cas-sign-monocypher.o third_party/monocypher.o
+
+$(ALL_OBJS): .config-stamp
+
 ## Default target.  cas-fetch is deliberately absent: it needs libcurl,
 ## which not every build host has.  Build it explicitly, or run CI, which
 ## does.
@@ -56,8 +83,12 @@ castool: castool.o cas-topic.o cas-sign.o cas-tree.o cas-pack.o cas.o cas-codec.
 # Reference incremental HTTP downloader (examples/).  Needs libcurl-dev;
 # build with MINIZ=1 for compressed depots.  Not built by default.
 CURL_LIBS ?= -lcurl
-cas-fetch: examples/cas-fetch.c cas.o cas-tree.o cas-pack.o cas-codec.o $(MINIZ_OBJS)
-	$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -I. $(LDFLAGS) $^ $(CURL_LIBS) $(LDLIBS)
+# Compiled straight from source, so nothing else ties it to the config
+# stamp; it is listed here and filtered back out of the link line, which
+# is what $^ would otherwise hand to the linker.
+cas-fetch: examples/cas-fetch.c cas.o cas-tree.o cas-pack.o cas-codec.o $(MINIZ_OBJS) .config-stamp
+	$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -I. $(LDFLAGS) \
+	  $(filter-out .config-stamp,$^) $(CURL_LIBS) $(LDLIBS)
 test_cas: test_cas.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_vfs: test_vfs.o vfs.o
@@ -128,7 +159,7 @@ version:
 	  "$$(sed -n 's/^#define SMOLVFS_VERSION_PATCH[[:space:]]*//p' version.h)"
 clean:
 	$(RM) $(OBJS) $(TEST_OBJS) $(LIBOBJS) $(TOOL_OBJS) cas-codec-miniz.o third_party/miniz.o \
-	  cas-sign-monocypher.o third_party/monocypher.o
+	  cas-sign-monocypher.o third_party/monocypher.o .config-stamp .config-stamp.tmp
 clean-all: clean
 	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep third_party/monocypher.dep
 test: $(TEST_BINS) castool
@@ -159,5 +190,5 @@ coverage-clean:
 	$(RM) -r coverage-html coverage.info *.gcda *.gcno
 
 .PHONY: all clean clean-all test smoke run coverage coverage-clean version \
-	analyze sanitize
+	analyze sanitize FORCE
 -include $(DEPS)
