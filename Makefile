@@ -51,7 +51,7 @@ smolvfs: $(OBJS) $(LIB) $(MINIZ_OBJS)
 	$(OBJCOPY) --only-keep-debug $@ $@.debug
 	$(STRIP) --strip-debug --strip-unneeded $@
 	$(OBJCOPY) --add-gnu-debuglink=$@.debug $@
-castool: castool.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
+castool: castool.o cas-topic.o cas-sign.o cas-tree.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 # Reference incremental HTTP downloader (examples/).  Needs libcurl-dev;
 # build with MINIZ=1 for compressed depots.  Not built by default.

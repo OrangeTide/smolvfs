@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas-tree.h"
+#include "cas-topic.h"
 #include "cas-pack.h"
 #include "cas-codec.h"
 #include "version.h"
@@ -1031,6 +1032,267 @@ cmd_import_pack(struct cas_tree *ct, int argc, char **argv)
 	return 0;
 }
 
+
+/****************************************************************
+ * Signed topics
+ ****************************************************************/
+
+/* Every topic verb needs a signer, and a build without one must say so
+ * plainly rather than fail somewhere further in with a vaguer message. */
+static int
+need_backend(void)
+{
+	if (cas_sign_available())
+		return 0;
+	fprintf(stderr,
+	        "%s: built without a signing backend; "
+	        "rebuild with MONOCYPHER=1\n", progname);
+	return 1;
+}
+
+static void
+print_topic_names(const unsigned char pk[CAS_SIGN_PUBKEY_LEN],
+                  const char *label)
+{
+	unsigned char id[CAS_HASH_LEN];
+	char idhex[CAS_HASH_HEX + 1], pkhex[CAS_HASH_HEX + 1];
+	char refname[CAS_HASH_HEX + 2 + CAS_TOPIC_LABEL_MAX + 1];
+
+	cas_sign_topic_id(id, pk);
+	cas_hex_encode(id, CAS_HASH_LEN, idhex);
+	cas_hex_encode(pk, CAS_SIGN_PUBKEY_LEN, pkhex);
+
+	printf("topic-id   %s\n", idhex);
+	printf("public-key %s\n", pkhex);
+	if (cas_topic_ref_name(refname, sizeof(refname), id, label) == CAS_OK)
+		printf("ref        %s\n", refname);
+}
+
+static int
+cmd_keygen(struct cas_tree *ct, int argc, char **argv)
+{
+	(void)ct;
+	if (argc < 1) {
+		fprintf(stderr, "usage: %s keygen <keyfile>\n", progname);
+		return 1;
+	}
+	if (need_backend())
+		return 1;
+
+	unsigned char pk[CAS_SIGN_PUBKEY_LEN];
+	int rc = cas_sign_key_generate(argv[0], pk);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: keygen '%s': %s\n", progname, argv[0],
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+
+	fprintf(stderr, "%s: wrote %s (mode 0600)\n", progname, argv[0]);
+	print_topic_names(pk, NULL);
+	return 0;
+}
+
+static int
+cmd_keyid(struct cas_tree *ct, int argc, char **argv)
+{
+	(void)ct;
+	if (argc < 1) {
+		fprintf(stderr, "usage: %s keyid <keyfile> [label]\n",
+		        progname);
+		return 1;
+	}
+	if (need_backend())
+		return 1;
+
+	unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+	int rc = cas_sign_key_load(argv[0], sk, pk);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: %s: %s\n", progname, argv[0],
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+	memset(sk, 0, sizeof(sk));
+	print_topic_names(pk, argc > 1 ? argv[1] : NULL);
+	return 0;
+}
+
+static int
+cmd_publish(struct cas_tree *ct, int argc, char **argv)
+{
+	const char *label = NULL;
+
+	while (argc > 0 && argv[0][0] == '-' && argv[0][1] == 'l') {
+		if (argc < 2)
+			break;
+		label = argv[1];
+		argc -= 2;
+		argv += 2;
+	}
+
+	if (argc < 2) {
+		fprintf(stderr,
+		        "usage: %s publish [-l label] <keyfile> <root-hash>\n",
+		        progname);
+		return 1;
+	}
+	if (need_backend())
+		return 1;
+
+	unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+	int rc = cas_sign_key_load(argv[0], sk, pk);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: %s: %s\n", progname, argv[0],
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+
+	unsigned char id[CAS_HASH_LEN];
+	char refname[CAS_HASH_HEX + 2 + CAS_TOPIC_LABEL_MAX + 1];
+
+	cas_sign_topic_id(id, pk);
+	if (cas_topic_ref_name(refname, sizeof(refname), id, label)
+	    != CAS_OK) {
+		fprintf(stderr, "%s: bad label\n", progname);
+		memset(sk, 0, sizeof(sk));
+		return 1;
+	}
+
+	/* seq and prev come from the topic's own head, so a publisher
+	 * never has to track them and cannot accidentally fork its own
+	 * chain by guessing. */
+	struct cas_vrec head, next;
+	char head_addr[CAS_HASH_HEX + 1];
+
+	memset(&next, 0, sizeof(next));
+	rc = cas_topic_head(ct, refname, &head, head_addr);
+	if (rc == CAS_OK) {
+		next.seq = head.seq + 1;
+		snprintf(next.prev, sizeof(next.prev), "%s", head_addr);
+	} else if (rc == CAS_ENOTFOUND) {
+		next.seq = 1;
+	} else {
+		fprintf(stderr, "%s: head: %s\n", progname,
+		        cas_sign_strerror(rc));
+		memset(sk, 0, sizeof(sk));
+		return 1;
+	}
+
+	memcpy(next.pubkey, pk, sizeof(pk));
+	next.timestamp = (int64_t)time(NULL);
+	snprintf(next.root, sizeof(next.root), "%s", argv[1]);
+
+	unsigned char rec[CAS_VREC_LEN];
+
+	rc = cas_vrec_encode(&next, sk, rec);
+	memset(sk, 0, sizeof(sk));
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: encode: %s\n", progname,
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+
+	rc = cas_topic_publish(ct, refname, rec, "publish");
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: publish: %s\n", progname,
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+
+	char addr[CAS_HASH_HEX + 1];
+
+	cas_vrec_address(rec, addr);
+	printf("%s\n", addr);
+	fprintf(stderr, "%s: %s seq %llu -> %s\n", progname, refname,
+	        (unsigned long long)next.seq, next.root);
+	return 0;
+}
+
+static void
+print_vrec(const struct cas_vrec *v, const char *addr)
+{
+	char idhex[CAS_HASH_HEX + 1];
+
+	cas_hex_encode(v->topic_id, CAS_HASH_LEN, idhex);
+	printf("record   %s\n", addr);
+	printf("topic-id %s\n", idhex);
+	printf("seq      %llu\n", (unsigned long long)v->seq);
+	printf("root     %s\n", v->root);
+	printf("prev     %s\n", v->prev[0] ? v->prev : "(none)");
+	printf("time     %lld\n", (long long)v->timestamp);
+}
+
+static int
+cmd_topic(struct cas_tree *ct, int argc, char **argv)
+{
+	if (argc < 1) {
+		fprintf(stderr, "usage: %s topic <ref>\n", progname);
+		return 1;
+	}
+	if (need_backend())
+		return 1;
+
+	struct cas_vrec head;
+	char addr[CAS_HASH_HEX + 1];
+	int rc = cas_topic_head(ct, argv[0], &head, addr);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: %s: %s\n", progname, argv[0],
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+	print_vrec(&head, addr);
+	return 0;
+}
+
+static int
+print_chain_entry(const struct cas_vrec *v, const char *addr, void *ctx)
+{
+	(void)ctx;
+	printf("%llu %s %s\n", (unsigned long long)v->seq, addr, v->root);
+	return 0;
+}
+
+static int
+cmd_topic_log(struct cas_tree *ct, int argc, char **argv)
+{
+	if (argc < 1) {
+		fprintf(stderr, "usage: %s topic-log <ref>\n", progname);
+		return 1;
+	}
+	if (need_backend())
+		return 1;
+
+	struct cas_vrec head;
+	char addr[CAS_HASH_HEX + 1];
+	int rc = cas_topic_head(ct, argv[0], &head, addr);
+
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: %s: %s\n", progname, argv[0],
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+
+	rc = cas_vchain_walk(cas_tree_cas(ct), addr, 0, print_chain_entry,
+	                     NULL);
+
+	/* An incomplete chain is normal for a node holding part of a
+	 * history, so it is worth saying and not worth failing over. */
+	if (rc == CAS_SIGN_EINCOMPLETE) {
+		fprintf(stderr, "%s: chain incomplete in this depot\n",
+		        progname);
+		return 0;
+	}
+	if (rc != CAS_OK) {
+		fprintf(stderr, "%s: walk: %s\n", progname,
+		        cas_sign_strerror(rc));
+		return 1;
+	}
+	return 0;
+}
+
 /****************************************************************
  * Command dispatch
  ****************************************************************/
@@ -1057,6 +1319,12 @@ static const struct command commands[] = {
 	{ "pack",   cmd_pack,   "pack [-z] loose objects (-z compresses)" },
 	{ "import-pack", cmd_import_pack,
 	  "import-pack [-z] <pack-file> [<ref> <root-hash>]" },
+	{ "keygen", cmd_keygen, "keygen <keyfile>" },
+	{ "keyid",  cmd_keyid,  "keyid <keyfile> [label]" },
+	{ "publish", cmd_publish,
+	  "publish [-l label] <keyfile> <root-hash>" },
+	{ "topic",  cmd_topic,  "topic <ref>  show the signed head" },
+	{ "topic-log", cmd_topic_log, "topic-log <ref>  walk the chain" },
 };
 
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))

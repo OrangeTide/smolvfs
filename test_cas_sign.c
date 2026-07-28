@@ -9,6 +9,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static char tmpdir[] = "/tmp/test_cas_sign_XXXXXX";
@@ -601,6 +602,121 @@ test_chain_walk_rejects_a_spliced_link(void)
     cas_free(store);
 }
 
+/****************************************************************
+ * Key files
+ ****************************************************************/
+
+static void
+test_key_file_round_trip(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    char path[512];
+
+    snprintf(path, sizeof(path), "%s/id.key", tmpdir);
+
+    unsigned char pk_gen[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_generate(path, pk_gen), CAS_OK);
+
+    /* 0600 from creation, not chmod afterwards: a window where the seed
+     * sits readable is a window. */
+    struct stat st;
+
+    ASSERT_INT_EQ(stat(path, &st), 0);
+    ASSERT_INT_EQ((int)(st.st_mode & 0777), 0600);
+
+    unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_load(path, sk, pk), CAS_OK);
+    ASSERT(memcmp(pk, pk_gen, CAS_SIGN_PUBKEY_LEN) == 0);
+
+    /* the loaded pair actually signs */
+    struct cas_vrec v;
+    unsigned char rec[CAS_VREC_LEN];
+    struct cas_vrec got;
+
+    fill(&v, pk, 1, root_a, NULL);
+    ASSERT_INT_EQ(cas_vrec_encode(&v, sk, rec), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_decode(rec, sizeof(rec), &got), CAS_OK);
+
+    /* two generations differ, so the entropy source is actually used */
+    char path2[512];
+
+    snprintf(path2, sizeof(path2), "%s/id2.key", tmpdir);
+
+    unsigned char pk2[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_generate(path2, pk2), CAS_OK);
+    ASSERT(memcmp(pk2, pk_gen, CAS_SIGN_PUBKEY_LEN) != 0);
+}
+
+static void
+test_key_file_refusals(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    char path[512];
+
+    snprintf(path, sizeof(path), "%s/refuse.key", tmpdir);
+
+    unsigned char pk[CAS_SIGN_PUBKEY_LEN];
+    unsigned char sk[CAS_SIGN_SECKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_generate(path, pk), CAS_OK);
+
+    /* Never silently replace an identity.  Overwriting a key destroys
+     * every topic it publishes, since the topic id is the key. */
+    ASSERT_INT_EQ(cas_sign_key_generate(path, pk),
+                  CAS_SIGN_EKEYEXISTS);
+
+    /* a secret others can read is not a secret */
+    ASSERT_INT_EQ(chmod(path, 0644), 0);
+    ASSERT_INT_EQ(cas_sign_key_load(path, sk, pk), CAS_SIGN_EKEYPERM);
+    ASSERT_INT_EQ(chmod(path, 0640), 0);
+    ASSERT_INT_EQ(cas_sign_key_load(path, sk, pk), CAS_SIGN_EKEYPERM);
+    ASSERT_INT_EQ(chmod(path, 0600), 0);
+    ASSERT_INT_EQ(cas_sign_key_load(path, sk, pk), CAS_OK);
+
+    char missing[512];
+
+    snprintf(missing, sizeof(missing), "%s/nope.key", tmpdir);
+    ASSERT_INT_EQ(cas_sign_key_load(missing, sk, pk), CAS_ENOTFOUND);
+
+    /* anything that is not a key file says so, rather than being
+     * misread as one */
+    char junk[512];
+
+    snprintf(junk, sizeof(junk), "%s/junk.key", tmpdir);
+
+    FILE *fp = fopen(junk, "w");
+
+    ASSERT(fp != NULL);
+    if (fp) {
+        fputs("not a key\\nat all\\n", fp);
+        fclose(fp);
+        ASSERT_INT_EQ(chmod(junk, 0600), 0);
+        ASSERT_INT_EQ(cas_sign_key_load(junk, sk, pk),
+                      CAS_SIGN_EKEYFORM);
+    }
+
+    /* right magic, truncated seed */
+    char shortseed[512];
+
+    snprintf(shortseed, sizeof(shortseed), "%s/short.key", tmpdir);
+    fp = fopen(shortseed, "w");
+    ASSERT(fp != NULL);
+    if (fp) {
+        fprintf(fp, "%s\\ndeadbeef\\n", CAS_SIGN_KEY_MAGIC);
+        fclose(fp);
+        ASSERT_INT_EQ(chmod(shortseed, 0600), 0);
+        ASSERT_INT_EQ(cas_sign_key_load(shortseed, sk, pk),
+                      CAS_SIGN_EKEYFORM);
+    }
+}
+
 int
 main(void)
 {
@@ -627,6 +743,8 @@ main(void)
     RUN(test_other_topic_is_rejected);
     RUN(test_chain_walk);
     RUN(test_chain_walk_rejects_a_spliced_link);
+    RUN(test_key_file_round_trip);
+    RUN(test_key_file_refusals);
 
     TEST_REPORT();
 }

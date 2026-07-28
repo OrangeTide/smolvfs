@@ -215,6 +215,16 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `prune` | `prune <ref> <keep-count>` | Drop all but the last `keep-count` entries from a ref's log |
 | `pack` | `pack [-z]` | Pack loose objects into `pack.dat`; `-z` compresses |
 | `import-pack` | `import-pack [-z] <pack-file> [<ref> <root-hash>]` | Merge a downloaded bundle (packfile) into this depot, deduplicated; optionally pin a ref to its root |
+| `keygen` | `keygen <keyfile>` | Generate a signing key, written 0600 and never overwriting an existing one; prints the topic id and ref name |
+| `keyid` | `keyid <keyfile> [label]` | Print a key's topic id, public key, and the ref name a label would use |
+| `publish` | `publish [-l label] <keyfile> <root-hash>` | Sign and publish a root as the topic's next head; the sequence number and predecessor link come from the current head |
+| `topic` | `topic <ref>` | Show the signed head record: seq, root, predecessor |
+| `topic-log` | `topic-log <ref>` | Walk the signed chain from the head, verifying each link |
+
+The topic commands need a signing backend, so build with `MONOCYPHER=1`;
+without one they say so rather than failing obscurely.  A secret key is
+local data and never belongs in a depot, which is why `keygen` takes a
+path of its own.
 
 Where a command accepts `<ref-or-hash>`, either a ref name or a 64-character
 hex hash may be used.

@@ -80,6 +80,10 @@ enum {
     CAS_SIGN_ECHAIN     = -27,  /* prev does not link to the predecessor */
     CAS_SIGN_EGAP       = -28,  /* seq jumped; intermediates unseen */
     CAS_SIGN_EINCOMPLETE = -29, /* chain ran out before its first record */
+
+    CAS_SIGN_EKEYPERM   = -30,  /* key file is readable by others */
+    CAS_SIGN_EKEYEXISTS = -31,  /* refusing to replace an existing key */
+    CAS_SIGN_EKEYFORM   = -32,  /* file is not a key file */
 };
 
 /** Human-readable text for a CAS_SIGN_* code. */
@@ -98,6 +102,64 @@ int
 cas_sign_key_pair(unsigned char sk[CAS_SIGN_SECKEY_LEN],
                   unsigned char pk[CAS_SIGN_PUBKEY_LEN],
                   const unsigned char seed[CAS_SIGN_SEED_LEN]);
+
+/****************************************************************
+ * Key files
+ ****************************************************************
+ *
+ * A secret key is local-domain data (ATOLL A3): it is never served, and
+ * it does not belong in a depot, whose whole purpose is to hand objects
+ * to other people.  So it lives in an ordinary file the caller names,
+ * outside any depot, and the two are never mixed.
+ *
+ * The file holds the 32-byte seed, from which the pair is derived on
+ * load.  Storing the seed rather than the expanded key keeps the file
+ * small and makes it obvious there is exactly one secret in it.
+ *
+ * Format, two text lines so the file is greppable and identifiable:
+ *
+ *     smolvfs-secret-key-v1
+ *     <64 hex characters>
+ *
+ * Permissions are enforced, not merely suggested.  Generation creates
+ * the file 0600 and refuses to overwrite one that exists, and loading
+ * refuses a key any group or other user can read.  A secret readable by
+ * the wrong account is not a secret, and reporting that as an error the
+ * moment it is noticed is cheaper than the alternative.
+ *
+ * Passphrase protection is deliberately absent for now: it needs a key
+ * derivation function and a decision about where the passphrase comes
+ * from, and a wrong answer there is worse than an honest plaintext file
+ * with strict permissions.
+ */
+
+#define CAS_SIGN_KEY_MAGIC "smolvfs-secret-key-v1"
+
+/** Generate a key pair and write the secret to `path`.
+ *
+ *  The seed comes from the system entropy source.  `path` must not
+ *  already exist, so an existing key is never silently replaced.  The
+ *  public key is returned for the caller to publish; it is not stored,
+ *  since it derives from the seed.
+ *
+ *  Returns CAS_OK, CAS_SIGN_EKEYEXISTS if `path` is already there,
+ *  CAS_SIGN_ENOBACKEND, or CAS_EIO.
+ */
+int
+cas_sign_key_generate(const char *path,
+                      unsigned char pk[CAS_SIGN_PUBKEY_LEN]);
+
+/** Load a secret key file and derive the pair.
+ *
+ *  Returns CAS_OK, CAS_ENOTFOUND if there is no such file,
+ *  CAS_SIGN_EKEYPERM if its permissions are too open,
+ *  CAS_SIGN_EKEYFORM if the contents are not a key file, or
+ *  CAS_SIGN_ENOBACKEND.
+ */
+int
+cas_sign_key_load(const char *path,
+                  unsigned char sk[CAS_SIGN_SECKEY_LEN],
+                  unsigned char pk[CAS_SIGN_PUBKEY_LEN]);
 
 /** Topic id for a public key: BLAKE2b-256 of the 32 key bytes, with no
  *  object framing.  This is the binding that makes a topic name

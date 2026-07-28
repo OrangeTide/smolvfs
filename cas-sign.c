@@ -1,10 +1,16 @@
 /* cas-sign.c : signed version records for CAS refs */
 /* PUBLIC DOMAIN (CC0-1.0) */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "cas-sign.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /****************************************************************
  * Backend selection
@@ -56,6 +62,9 @@ cas_sign_strerror(int err)
     case CAS_SIGN_ECHAIN:        return "prev does not link to the predecessor";
     case CAS_SIGN_EGAP:          return "sequence gap; intermediates unseen";
     case CAS_SIGN_EINCOMPLETE:   return "chain incomplete in this store";
+    case CAS_SIGN_EKEYPERM:      return "key file is readable by others";
+    case CAS_SIGN_EKEYEXISTS:    return "key file already exists";
+    case CAS_SIGN_EKEYFORM:      return "not a key file";
     default:                     return cas_strerror(err);
     }
 }
@@ -330,4 +339,147 @@ cas_vchain_walk(struct cas *store, const char *head_addr,
         snprintf(addr, sizeof(addr), "%s", v.prev);
         v = prev;
     }
+}
+
+/****************************************************************
+ * Key files
+ ****************************************************************/
+
+static int
+read_entropy(unsigned char *out, size_t len)
+{
+    FILE *fp = fopen("/dev/urandom", "rb");
+
+    if (!fp)
+        return CAS_EIO;
+
+    size_t n = fread(out, 1, len, fp);
+
+    fclose(fp);
+    return n == len ? CAS_OK : CAS_EIO;
+}
+
+int
+cas_sign_key_generate(const char *path,
+                      unsigned char pk[CAS_SIGN_PUBKEY_LEN])
+{
+    if (!path || !pk)
+        return CAS_ERR;
+    if (!cas_sign_available())
+        return CAS_SIGN_ENOBACKEND;
+
+    unsigned char seed[CAS_SIGN_SEED_LEN];
+    unsigned char sk[CAS_SIGN_SECKEY_LEN];
+    int rc = read_entropy(seed, sizeof(seed));
+
+    if (rc != CAS_OK)
+        return rc;
+
+    rc = cas_sign_key_pair(sk, pk, seed);
+    if (rc != CAS_OK) {
+        memset(seed, 0, sizeof(seed));
+        return rc;
+    }
+
+    char hex[CAS_HASH_HEX + 1];
+
+    cas_hex_encode(seed, sizeof(seed), hex);
+    memset(seed, 0, sizeof(seed));
+    memset(sk, 0, sizeof(sk));
+
+    /* O_EXCL so an existing key is never replaced by accident, and 0600
+     * from the start rather than chmod afterwards, which would leave a
+     * window where the seed sat on disk readable. */
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+
+    if (fd < 0) {
+        int err = errno == EEXIST ? CAS_SIGN_EKEYEXISTS : CAS_EIO;
+
+        memset(hex, 0, sizeof(hex));
+        return err;
+    }
+
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "%s\n%s\n",
+                     CAS_SIGN_KEY_MAGIC, hex);
+
+    memset(hex, 0, sizeof(hex));
+    if (n < 0 || (size_t)n >= sizeof(buf)) {
+        close(fd);
+        unlink(path);
+        memset(buf, 0, sizeof(buf));
+        return CAS_ERR;
+    }
+
+    ssize_t w = write(fd, buf, (size_t)n);
+
+    memset(buf, 0, sizeof(buf));
+    if (w != n || fsync(fd) != 0) {
+        close(fd);
+        unlink(path);
+        return CAS_EIO;
+    }
+    if (close(fd) != 0) {
+        unlink(path);
+        return CAS_EIO;
+    }
+    return CAS_OK;
+}
+
+int
+cas_sign_key_load(const char *path,
+                  unsigned char sk[CAS_SIGN_SECKEY_LEN],
+                  unsigned char pk[CAS_SIGN_PUBKEY_LEN])
+{
+    if (!path || !sk || !pk)
+        return CAS_ERR;
+    if (!cas_sign_available())
+        return CAS_SIGN_ENOBACKEND;
+
+    struct stat st;
+
+    if (stat(path, &st) != 0)
+        return CAS_ENOTFOUND;
+
+    /* A secret any other account can read is not a secret.  Saying so
+     * here is cheaper than the alternative, and it is the check every
+     * tool that handles private keys has learned to make. */
+    if (st.st_mode & 0077)
+        return CAS_SIGN_EKEYPERM;
+
+    FILE *fp = fopen(path, "r");
+
+    if (!fp)
+        return CAS_ENOTFOUND;
+
+    char magic[64] = {0};
+    char hex[128] = {0};
+    int rc = CAS_SIGN_EKEYFORM;
+
+    if (!fgets(magic, sizeof(magic), fp))
+        goto out;
+    magic[strcspn(magic, "\r\n")] = '\0';
+    if (strcmp(magic, CAS_SIGN_KEY_MAGIC) != 0)
+        goto out;
+
+    if (!fgets(hex, sizeof(hex), fp))
+        goto out;
+    hex[strcspn(hex, "\r\n")] = '\0';
+    if (strlen(hex) != CAS_HASH_HEX)
+        goto out;
+
+    unsigned char seed[CAS_SIGN_SEED_LEN];
+
+    if (cas_hex_decode(hex, CAS_HASH_HEX, seed, sizeof(seed)) != 0) {
+        memset(seed, 0, sizeof(seed));
+        goto out;
+    }
+
+    rc = cas_sign_key_pair(sk, pk, seed);
+    memset(seed, 0, sizeof(seed));
+
+out:
+    memset(hex, 0, sizeof(hex));
+    fclose(fp);
+    return rc;
 }
