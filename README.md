@@ -358,7 +358,7 @@ This compiles all source files and produces the `smolvfs` binary (from
 ```sh
 make clean        # remove object files
 make clean-all    # remove objects, binary, and dependency files
-make test         # run test.sh (if present)
+make test         # build the suite and castool, then run test.sh
 make run          # build and run smolvfs
 make version      # print the library version from version.h
 make MONOCYPHER=1 # build with the bundled EdDSA-BLAKE2b signer

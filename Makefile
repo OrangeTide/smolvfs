@@ -131,9 +131,9 @@ clean:
 	  cas-sign-monocypher.o third_party/monocypher.o
 clean-all: clean
 	$(RM) smolvfs smolvfs.debug castool cas-fetch libvfs.a $(TEST_BINS) $(DEPS) third_party/miniz.dep third_party/monocypher.dep
-test: $(TEST_BINS)
+test: $(TEST_BINS) castool
 	./test.sh
-smoke: $(TEST_BINS)
+smoke: $(TEST_BINS) castool
 	./test.sh
 run: smolvfs
 	./smolvfs

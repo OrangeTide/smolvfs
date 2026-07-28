@@ -311,6 +311,8 @@ enum {
     CAS_FSCK_NOCODEC,    /* compressed, but no decoder to verify with */
     CAS_FSCK_REENCODED,  /* re-encoded object (htree); verify at the
                             tree layer with cas_tree_verify */
+    CAS_FSCK_FOREIGN,    /* a valid object, but not the kind this check
+                            understands; see cas_tree_verify */
 };
 
 /** Callback for cas_fsck.  Called for each object checked.  status

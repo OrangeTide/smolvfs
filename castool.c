@@ -805,6 +805,9 @@ fsck_reporter(const char *path, const char *hash, int status,
 	case CAS_TREE_FSCK_NOCODEC:
 		msg = "skipped (no codec)";
 		break;
+	case CAS_TREE_FSCK_FOREIGN:
+		msg = "skipped (not a directory)";
+		break;
 	default:
 		msg = "unknown";
 		break;

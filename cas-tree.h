@@ -149,6 +149,8 @@ enum {
     CAS_TREE_FSCK_CORRUPT,
     CAS_TREE_FSCK_BAD_TREE,
     CAS_TREE_FSCK_NOCODEC,  /* compressed blob, no decoder to verify */
+    CAS_TREE_FSCK_FOREIGN,  /* ref points at something that is not a
+                               directory; valid, just not ours to walk */
 };
 
 /** Callback for cas_tree_fsck.
@@ -185,6 +187,12 @@ cas_tree_fsck_root(struct cas_tree *ct, const char *root_hash,
  *  own bytes when that entry set is re-encoded; see FORMAT.md,
  *  "Verifying an htree", for why one check without the other is not
  *  enough.
+ *
+ *  An object of some other type returns CAS_FSCK_FOREIGN rather than
+ *  CAS_FSCK_CORRUPT.  Nothing constrains a ref to name a directory, and
+ *  a signed topic head deliberately names a version record, so calling
+ *  that corruption would be this layer claiming authority over types it
+ *  does not own.
  */
 int
 cas_tree_verify(struct cas_tree *ct, const char *hash);

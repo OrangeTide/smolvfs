@@ -12,6 +12,18 @@ for t in test_cas test_cas_codec test_vfs test_cas_tree test_cas_pack test_cas_o
     fi
 done
 
+# The CLI needs its own driver: exit statuses, file permissions, and the
+# messages a person reads are not reachable from the C tests.
+if [ -x ./castool ] && [ -x ./test_castool.sh ]; then
+    if ./test_castool.sh; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "skipping castool tests (build castool first)" >&2
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "SOME TESTS FAILED" >&2
     exit 1

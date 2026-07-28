@@ -1554,7 +1554,7 @@ cas_tree_verify(struct cas_tree *ct, const char *hash)
 
     if (strcmp(type, "htree") != 0) {
         cas_close(&cf);
-        return CAS_FSCK_CORRUPT;
+        return CAS_FSCK_FOREIGN;
     }
 
     int status = htree_verify(cf.data, cf.len, hash);
@@ -1613,6 +1613,14 @@ fsck_tree(struct cas_tree *ct, const char *path,
         /* compressed tree, no decoder: a skip.  Cannot descend into
          * a tree we cannot decode, so this subtree is left unchecked. */
         if (fn && fn(path, tree_hash, CAS_TREE_FSCK_NOCODEC, ctx))
+            return 1;
+        return 0;
+    }
+    if (status == CAS_FSCK_FOREIGN) {
+        /* A ref may name any object, and a signed topic head names a
+         * version record on purpose.  Report it and stop descending;
+         * whoever understands the type is the one who can check it. */
+        if (fn && fn(path, tree_hash, CAS_TREE_FSCK_FOREIGN, ctx))
             return 1;
         return 0;
     }
