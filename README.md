@@ -1166,22 +1166,36 @@ callback as `cas_fsck`.
 **Returns:** `CAS_OK` if all objects passed, `CAS_ERR` if any failed.
 
 ```c
+typedef int (*cas_pack_verify_fn)(const char *type, const void *data,
+                                  size_t len, const char *hash);
+
 int
 cas_pack_import(struct cas_pack *pack, struct cas *store,
-                int policy, int codec, uint64_t *total_out,
-                uint64_t *stored_out);
+                int policy, int codec, cas_pack_verify_fn verify,
+                uint64_t *total_out, uint64_t *stored_out);
 ```
 
 Merge every object from a packfile into `store`, deduplicated by
-address.  Each object is re-verified against its decoded content before
-being stored, so a bundle from an untrusted server cannot poison the
-depot: a mismatch aborts with `CAS_ERR` and that object is not written
-(objects merged earlier in the call remain, so import is not atomic).
-Objects already present are skipped.  `policy` and `codec` control
-compression exactly as `cas_put_object_z` does; pass
-`CAS_COMPRESS_NEVER` to store raw.  If non-NULL, `*total_out` receives
-the number of objects processed and `*stored_out` the number newly
-written.  This backs `castool import-pack`.
+address.  A bundle is somebody else's bytes, so importing one is a trust
+boundary and nothing crosses it unchecked.  A failed check aborts with
+`CAS_ERR` and that object is not written (objects merged earlier in the
+call remain, so import is not atomic).  Objects already present are
+skipped.
+
+Pass `verify` to decide what is admissible.  It sees every object and
+replaces the built-in check, so it is the authority; pass
+`cas_tree_check_object` unless there is a reason not to.  Pass `NULL`
+only when no re-encoded content is expected: a self-addressed object
+still has to hash to the address it claims, but an `htree` is then
+*refused* rather than trusted, because this layer cannot rebuild the
+canonical form its address commits to.  Neither the pack index checksum
+nor the htree's internal adler32 substitutes, since whoever produced the
+bundle computed both.
+
+`policy` and `codec` control compression exactly as `cas_put_object_z`
+does; pass `CAS_COMPRESS_NEVER` to store raw.  If non-NULL, `*total_out`
+receives the number of objects processed and `*stored_out` the number
+newly written.  This backs `castool import-pack`.
 
 **Returns:** `CAS_OK` on success.
 

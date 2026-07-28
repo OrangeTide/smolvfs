@@ -189,6 +189,21 @@ cas_tree_fsck_root(struct cas_tree *ct, const char *root_hash,
 int
 cas_tree_verify(struct cas_tree *ct, const char *hash);
 
+/** Check an in-memory object against the address it claims, without
+ *  storing it or touching a depot.
+ *
+ *  An `htree` is checked by the two rules of cas_tree_verify.  A `tree`
+ *  must hash to `hash` and be spelled canonically.  Any other type must
+ *  hash to `hash`.  `data` is the plaintext, not a stored form.
+ *
+ *  Returns CAS_OK if the object may be admitted, CAS_ERR otherwise.  The
+ *  signature matches cas_pack_verify_fn, so it can be handed to
+ *  cas_pack_import directly.
+ */
+int
+cas_tree_check_object(const char *type, const void *data, size_t len,
+                      const char *hash);
+
 /** Store an object obtained from outside, checking it first.
  *
  *  This is the trust boundary.  Objects are validated as they enter the

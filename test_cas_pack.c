@@ -770,7 +770,7 @@ test_pack_import(void)
 	uint64_t total = 0, stored = 0;
 
 	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
-	              CAS_CODEC_NONE, &total, &stored), CAS_OK);
+	              CAS_CODEC_NONE, NULL, &total, &stored), CAS_OK);
 	ASSERT_INT_EQ((int)total, 4);
 	ASSERT_INT_EQ((int)stored, 4);
 
@@ -787,7 +787,7 @@ test_pack_import(void)
 	/* re-import is a no-op: every object already present */
 	total = stored = 0;
 	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
-	              CAS_CODEC_NONE, &total, &stored), CAS_OK);
+	              CAS_CODEC_NONE, NULL, &total, &stored), CAS_OK);
 	ASSERT_INT_EQ((int)total, 4);
 	ASSERT_INT_EQ((int)stored, 0);
 
@@ -840,7 +840,7 @@ test_pack_import_corrupt(void)
 	uint64_t total = 0, stored = 0;
 
 	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_NEVER,
-	              CAS_CODEC_NONE, &total, &stored), CAS_ERR);
+	              CAS_CODEC_NONE, NULL, &total, &stored), CAS_ERR);
 
 	/* the tampered object was verified before storing, so it never
 	 * entered the depot */
@@ -886,7 +886,7 @@ test_pack_import_compressed(void)
 	uint64_t total = 0, stored = 0;
 
 	ASSERT_INT_EQ(cas_pack_import(pack, t, CAS_COMPRESS_GUESS,
-	              CAS_CODEC_DEFLATE, &total, &stored), CAS_OK);
+	              CAS_CODEC_DEFLATE, NULL, &total, &stored), CAS_OK);
 	ASSERT_INT_EQ((int)total, 1);
 	ASSERT_INT_EQ((int)stored, 1);
 

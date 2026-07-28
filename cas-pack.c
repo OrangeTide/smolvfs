@@ -495,6 +495,7 @@ struct import_ctx {
 	struct cas *store;
 	int policy;
 	int codec;
+	cas_pack_verify_fn verify;
 	uint64_t total;
 	uint64_t stored;
 	int rc;
@@ -514,17 +515,30 @@ import_one(const char *hash, void *ctx)
 		return 1;
 	}
 
-	/* An "htree" object is a lookup-optimized re-encoding of a "tree"
-	 * whose address is the hash of the canonical text form, not of the
-	 * htree bytes; that text form cannot be rebuilt here, so the bytes
-	 * are stored verbatim at the pack's address and trusted (the pack
-	 * index is checksummed, and the htree carries its own adler32).
-	 * Every other type is self-addressed: its content must hash to the
-	 * claimed address, so a tampered object is rejected before it is
-	 * written into the depot. */
+	/* A bundle is somebody else's bytes, so this is a trust boundary and
+	 * nothing crosses it unchecked.
+	 *
+	 * With a verifier, it is the authority for every type and replaces
+	 * the check below.  Without one, a self-addressed object still has
+	 * to hash to the address it claims, but a re-encoded object is
+	 * refused: its address commits to a canonical form this layer cannot
+	 * rebuild, so there is nothing here to check it against.  Refusing
+	 * is the only safe answer.  Trusting the pack index checksum and the
+	 * htree's own adler32 is not: both are computed by whoever produced
+	 * the bundle. */
 	int reencoded = cas_type_is_reencoded(type);
 
-	if (!reencoded) {
+	if (ic->verify) {
+		if (ic->verify(type, cf.data, cf.len, hash) != CAS_OK) {
+			cas_close(&cf);
+			ic->rc = CAS_ERR;
+			return 1;
+		}
+	} else if (reencoded) {
+		cas_close(&cf);
+		ic->rc = CAS_ERR;
+		return 1;
+	} else {
 		char computed[CAS_HASH_HEX + 1];
 
 		cas_hash_object(type, cf.data, cf.len, computed);
@@ -562,14 +576,15 @@ import_one(const char *hash, void *ctx)
 
 int
 cas_pack_import(struct cas_pack *pack, struct cas *store,
-                int policy, int codec, uint64_t *total_out,
-                uint64_t *stored_out)
+                int policy, int codec, cas_pack_verify_fn verify,
+                uint64_t *total_out, uint64_t *stored_out)
 {
 	struct import_ctx ic = {
 		.pack = pack,
 		.store = store,
 		.policy = policy,
 		.codec = codec,
+		.verify = verify,
 	};
 
 	cas_pack_foreach(pack, import_one, &ic);

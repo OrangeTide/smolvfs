@@ -125,11 +125,13 @@ write_all(int fd, const char *data, size_t len)
 }
 
 /* The fetched bytes are already the loose-object file (data region plus
- * trailer), so write them verbatim into <depot>/<xx>/<hash> and let the
- * library verify the result against its address. */
+ * trailer), so write them verbatim into <depot>/<xx>/<hash>, then verify
+ * before anything is allowed to read them.  A peer's bytes are checked
+ * as they enter the depot and trusted afterwards, so a failure here has
+ * to remove the file rather than leave it for the walk to descend into. */
 static int
-store_object(struct cas *store, const char *base, const char *hash,
-             const struct buf *b)
+store_object(struct cas *store, struct cas_tree *ct, const char *base,
+             const char *hash, const struct buf *b)
 {
     char dir[MAX_PATH], path[MAX_PATH], tmp[MAX_PATH];
 
@@ -169,7 +171,15 @@ store_object(struct cas *store, const char *base, const char *hash,
 
     int st = cas_fsck_object(store, hash);
 
-    if (st == CAS_FSCK_OK || st == CAS_FSCK_REENCODED)
+    /* REENCODED means an htree, whose address commits to the canonical
+     * text form of the directory rather than to its own bytes, so the
+     * object layer cannot check it and says so.  Treating that as a pass
+     * would admit the one type a hostile server has the most to gain
+     * from forging.  cas_tree_verify is what can check it. */
+    if (st == CAS_FSCK_REENCODED)
+        st = ct ? cas_tree_verify(ct, hash) : CAS_FSCK_CORRUPT;
+
+    if (st == CAS_FSCK_OK)
         return 0;
 
     unlink(path);
@@ -305,7 +315,7 @@ main(int argc, char **argv)
         }
         if (http_get(curl, url, &b) != 0)
             goto out;
-        if (store_object(store, cas_basedir(store), hash, &b) != 0)
+        if (store_object(store, ct, cas_basedir(store), hash, &b) != 0)
             goto out;
 
         objects++;

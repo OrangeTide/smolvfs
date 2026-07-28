@@ -1564,17 +1564,15 @@ cas_tree_verify(struct cas_tree *ct, const char *hash)
 }
 
 int
-cas_tree_put_checked(struct cas_tree *ct, const char *type,
-                     const void *data, size_t len, const char *hash)
+cas_tree_check_object(const char *type, const void *data, size_t len,
+                      const char *hash)
 {
-    if (!ct || !type || !hash || (!data && len > 0))
+    if (!type || !hash || (!data && len > 0))
         return CAS_ERR;
 
-    if (strcmp(type, "htree") == 0) {
-        if (htree_verify(data, len, hash) != CAS_FSCK_OK)
-            return CAS_ERR;
-        return cas_put_object_at(ct->store, type, data, len, hash);
-    }
+    if (strcmp(type, "htree") == 0)
+        return htree_verify(data, len, hash) == CAS_FSCK_OK
+               ? CAS_OK : CAS_ERR;
 
     /* Every other type is addressed by its own plaintext, so the
      * address is the check. */
@@ -1587,6 +1585,18 @@ cas_tree_put_checked(struct cas_tree *ct, const char *type,
 
     if (strcmp(type, "tree") == 0 &&
         tree_text_verify(data, len) != CAS_FSCK_OK)
+        return CAS_ERR;
+
+    return CAS_OK;
+}
+
+int
+cas_tree_put_checked(struct cas_tree *ct, const char *type,
+                     const void *data, size_t len, const char *hash)
+{
+    if (!ct)
+        return CAS_ERR;
+    if (cas_tree_check_object(type, data, len, hash) != CAS_OK)
         return CAS_ERR;
 
     return cas_put_object_at(ct->store, type, data, len, hash);

@@ -993,8 +993,11 @@ cmd_import_pack(struct cas_tree *ct, int argc, char **argv)
 	}
 
 	uint64_t total = 0, stored = 0;
+	/* A bundle comes from outside, so every object is checked before
+	 * it is admitted; cas_tree_check_object is what knows how to check
+	 * an htree. */
 	int rc = cas_pack_import(pack, store, policy, CAS_CODEC_DEFLATE,
-	                         &total, &stored);
+	                         cas_tree_check_object, &total, &stored);
 
 	cas_pack_close(pack);
 

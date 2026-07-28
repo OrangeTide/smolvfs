@@ -1632,7 +1632,8 @@ test_htree_pack_import(void)
     uint64_t total = 0, stored = 0;
 
     ASSERT_INT_EQ(cas_pack_import(pack, tgt, CAS_COMPRESS_NEVER,
-                  CAS_CODEC_NONE, &total, &stored), CAS_OK);
+                  CAS_CODEC_NONE, cas_tree_check_object,
+                  &total, &stored), CAS_OK);
     ASSERT_INT_EQ((int)total, 2);
     ASSERT_INT_EQ((int)stored, 2);
     cas_pack_close(pack);
@@ -2369,6 +2370,106 @@ test_htree_lookup_malformed(void)
 }
 
 /****************************************************************
+ * Bundle import is a trust boundary
+ ****************************************************************/
+
+static void
+test_pack_import_rejects_forged_htree(void)
+{
+    struct cas *src = make_store("import_src");
+    struct cas_tree *sct = cas_tree_new(src);
+
+    cas_tree_set_flags(sct, CAS_TREE_USE_HTREE);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put(src, "x", 1, h), CAS_OK);
+
+    static const char *names[] = { "aaa", "bbb", "ccc", };
+    struct cas_tree_dir dir;
+
+    cas_tree_dir_init(&dir);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        struct cas_tree_entry e = t_entry(names[i], h);
+
+        ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+    }
+
+    char hash[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_tree_store(sct, &dir, hash), CAS_OK);
+    cas_tree_dir_free(&dir);
+
+    /* Forge the htree in the source depot, so the bundle carries it. */
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+
+    ASSERT_INT_EQ(cas_open_object(src, &cf, hash, type, sizeof(type)),
+                  CAS_OK);
+
+    size_t len = cf.len;
+    unsigned char *bad = malloc(len);
+
+    ASSERT(bad != NULL);
+    if (!bad) {
+        cas_close(&cf);
+        cas_tree_free(sct);
+        cas_free(src);
+        return;
+    }
+    memcpy(bad, cf.data, len);
+    cas_close(&cf);
+
+    size_t cdb_len = len - 8;
+    size_t spos = t_find_slot(bad, cdb_len, "ccc");
+
+    ASSERT(spos != 0);
+
+    uint32_t rec = t_le32(bad + spos + 4);
+
+    memcpy(bad + rec + 8, "aaa", 3);
+    t_store_le32(bad + cdb_len, t_adler32(bad, cdb_len));
+
+    ASSERT_INT_EQ(cas_remove(src, hash), CAS_OK);
+    ASSERT_INT_EQ(cas_put_object_at(src, "htree", bad, len, hash),
+                  CAS_OK);
+    free(bad);
+
+    char packpath[512];
+
+    snprintf(packpath, sizeof(packpath), "%s/forged.pack", tmpdir);
+    ASSERT_INT_EQ(cas_pack_create(src, packpath), CAS_OK);
+
+    struct cas *dst = make_store("import_dst");
+    struct cas_tree *dct = cas_tree_new(dst);
+    struct cas_pack *pack = cas_pack_open(packpath);
+
+    ASSERT(pack != NULL);
+
+    uint64_t total = 0, stored = 0;
+
+    /* With a verifier the forgery is refused and never lands. */
+    ASSERT_INT_EQ(cas_pack_import(pack, dst, CAS_COMPRESS_NEVER,
+                  CAS_CODEC_NONE, cas_tree_check_object,
+                  &total, &stored), CAS_ERR);
+    ASSERT_INT_EQ(cas_exists(dst, hash), 0);
+
+    /* Without one, a re-encoded object is refused rather than trusted,
+     * because this layer has nothing to check it against. */
+    total = stored = 0;
+    ASSERT_INT_EQ(cas_pack_import(pack, dst, CAS_COMPRESS_NEVER,
+                  CAS_CODEC_NONE, NULL, &total, &stored), CAS_ERR);
+    ASSERT_INT_EQ(cas_exists(dst, hash), 0);
+
+    cas_pack_close(pack);
+    cas_tree_free(dct);
+    cas_free(dst);
+    cas_tree_free(sct);
+    cas_free(src);
+}
+
+/****************************************************************
  * Main
  ****************************************************************/
 
@@ -2423,6 +2524,7 @@ main(void)
     RUN(test_text_tree_non_canonical);
     RUN(test_put_checked_rejects_forgery);
     RUN(test_htree_lookup_malformed);
+    RUN(test_pack_import_rejects_forged_htree);
 
     TEST_REPORT();
 }
