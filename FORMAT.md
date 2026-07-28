@@ -527,9 +527,50 @@ In order, because the answers mean different things:
    needs to tell them apart.
 3. **The signature** over bytes `[0, 152)` under `pubkey`.
 
-Sequence monotonicity and the `prev` chain are checked against a known
-previous head, which is a question about two records rather than one, and
-belongs a layer above this.
+### Chains
+
+A verified record proves who published a root. It does not say the
+publication is current: a signature is just as valid on a version its
+publisher has since replaced. That is a question about two records.
+
+Records form a chain. Each names its predecessor by address and carries
+`seq` exactly one higher, so the order is signed end to end and cannot be
+reordered or trimmed without the key. **`seq` advances by exactly one.**
+The publisher assigns it and has no reason to skip, and requiring it
+makes a hole visible rather than indistinguishable from a record that
+never arrived.
+
+Deciding whether a candidate may replace a head has five outcomes beyond
+acceptance, and they are not interchangeable:
+
+| Outcome | Meaning |
+|---|---|
+| different topic | valid, but not a continuation of this one |
+| stale | older than, or identical to, the current head |
+| **fork** | a *different* record at the same `seq` |
+| broken link | the immediate successor, but `prev` names something else |
+| gap | newer, with `seq` holes this node has not seen |
+
+**A fork is the one that matters.** A single writer behaving correctly
+cannot produce two records at one `seq`, so holding both is evidence the
+key is being used by someone else. It is not a validation failure to
+retry past; it is the outcome that should stop a subscriber.
+
+**A gap is not a rejection.** It leaves a decision with the caller: fetch
+the intermediate records and re-check, keeping full continuity, or accept
+the jump on the signature alone, which is sound for advancing a head but
+abandons the audit trail. Folding that into a yes-or-no answer would hide
+the choice.
+
+Walking a chain backwards checks each record's own validity *and* its
+link to its successor: same topic, `seq` exactly one lower, and the
+successor's `prev` naming its address. Checking signatures alone is not
+enough, because every record in a spliced chain can be genuinely signed
+while the chain itself is fabricated.
+
+A cycle is impossible without predicting a hash, since a record's address
+covers its `prev` field. Reaching a predecessor that is not stored is an
+ordinary state for a node holding part of a history, not a fault.
 
 ## Object map
 

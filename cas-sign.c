@@ -3,6 +3,7 @@
 
 #include "cas-sign.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /****************************************************************
@@ -49,6 +50,12 @@ cas_sign_strerror(int err)
     case CAS_SIGN_EBADFORM:      return "malformed version record";
     case CAS_SIGN_EBADBIND:      return "topic id does not match key";
     case CAS_SIGN_EBADSIG:       return "signature does not verify";
+    case CAS_SIGN_ETOPIC:        return "record belongs to another topic";
+    case CAS_SIGN_ESTALE:        return "record is not newer than the head";
+    case CAS_SIGN_EFORK:         return "two records at one seq: key compromise";
+    case CAS_SIGN_ECHAIN:        return "prev does not link to the predecessor";
+    case CAS_SIGN_EGAP:          return "sequence gap; intermediates unseen";
+    case CAS_SIGN_EINCOMPLETE:   return "chain incomplete in this store";
     default:                     return cas_strerror(err);
     }
 }
@@ -206,4 +213,121 @@ cas_vrec_decode(const unsigned char *buf, size_t len,
      * would make a build without a backend look like a verifying one. */
     return CAS_SIGN_ENOBACKEND;
 #endif
+}
+
+int
+cas_vrec_address(const unsigned char rec[CAS_VREC_LEN], char *hash_out)
+{
+    if (!rec || !hash_out)
+        return CAS_ERR;
+    return cas_hash_object(CAS_VREC_TYPE, rec, CAS_VREC_LEN, hash_out);
+}
+
+/****************************************************************
+ * Chains
+ ****************************************************************/
+
+int
+cas_vrec_succeeds(const struct cas_vrec *cur, const char *cur_addr,
+                  const struct cas_vrec *cand)
+{
+    if (!cand)
+        return CAS_ERR;
+
+    /* No head yet: any valid record for the topic starts one. */
+    if (!cur)
+        return CAS_OK;
+    if (!cur_addr)
+        return CAS_ERR;
+
+    if (memcmp(cur->topic_id, cand->topic_id, CAS_HASH_LEN) != 0)
+        return CAS_SIGN_ETOPIC;
+
+    if (cand->seq < cur->seq)
+        return CAS_SIGN_ESTALE;
+
+    if (cand->seq == cur->seq) {
+        /* Same generation.  Either it is the record we already hold,
+         * or the key signed two different things at one seq, which an
+         * honest single writer cannot do. */
+        if (strcmp(cand->root, cur->root) == 0 &&
+            strcmp(cand->prev, cur->prev) == 0 &&
+            cand->timestamp == cur->timestamp)
+            return CAS_SIGN_ESTALE;
+        return CAS_SIGN_EFORK;
+    }
+
+    if (cand->seq == cur->seq + 1) {
+        if (strcmp(cand->prev, cur_addr) != 0)
+            return CAS_SIGN_ECHAIN;
+        return CAS_OK;
+    }
+
+    return CAS_SIGN_EGAP;
+}
+
+/** Load and verify one record from the store. */
+static int
+vchain_load(struct cas *store, const char *addr, struct cas_vrec *out)
+{
+    struct cas_file cf;
+    char type[CAS_TYPE_MAX + 1];
+    int rc = cas_open_object(store, &cf, addr, type, sizeof(type));
+
+    if (rc != CAS_OK)
+        return rc;
+
+    if (strcmp(type, CAS_VREC_TYPE) != 0) {
+        cas_close(&cf);
+        return CAS_ETYPE;
+    }
+
+    rc = cas_vrec_decode(cf.data, cf.len, out);
+    cas_close(&cf);
+    return rc;
+}
+
+int
+cas_vchain_walk(struct cas *store, const char *head_addr,
+                uint64_t stop_seq, cas_vchain_fn fn, void *ctx)
+{
+    if (!store || !head_addr)
+        return CAS_ERR;
+
+    char addr[CAS_HASH_HEX + 1];
+    struct cas_vrec v;
+    int rc = vchain_load(store, head_addr, &v);
+
+    if (rc != CAS_OK)
+        return rc;
+
+    snprintf(addr, sizeof(addr), "%s", head_addr);
+
+    for (;;) {
+        if (fn && fn(&v, addr, ctx))
+            return CAS_OK;
+
+        if (v.seq <= stop_seq || v.prev[0] == '\0')
+            return CAS_OK;
+
+        struct cas_vrec prev;
+
+        rc = vchain_load(store, v.prev, &prev);
+        if (rc == CAS_ENOTFOUND)
+            return CAS_SIGN_EINCOMPLETE;
+        if (rc != CAS_OK)
+            return rc;
+
+        /* The link is only as good as what it connects.  Checking the
+         * predecessor's own signature is not enough: it has to be the
+         * predecessor of *this* record, in this topic, at the seq the
+         * chain requires. */
+        if (memcmp(prev.topic_id, v.topic_id, CAS_HASH_LEN) != 0)
+            return CAS_SIGN_ETOPIC;
+        if (prev.seq + 1 != v.seq)
+            return CAS_SIGN_ECHAIN;
+
+        snprintf(addr, sizeof(addr), "%s", v.prev);
+        v = prev;
+    }
 }

@@ -9,6 +9,18 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+static char tmpdir[] = "/tmp/test_cas_sign_XXXXXX";
+
+static void
+cleanup(void)
+{
+    char cmd[512];
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+    if (system(cmd)) { /* best effort */ }
+}
 
 /* A fixed seed, so a failure reproduces. */
 static const unsigned char seed_a[CAS_SIGN_SEED_LEN] = {
@@ -339,9 +351,265 @@ test_record_is_an_ordinary_object(void)
     ASSERT(cas_valid_hash(h1));
 }
 
+/****************************************************************
+ * Chains
+ ****************************************************************/
+
+/* Build record n of a chain: seq n, root varies, prev links back. */
+static void
+chain_record(unsigned char out[CAS_VREC_LEN], char addr[CAS_HASH_HEX + 1],
+             const unsigned char sk[CAS_SIGN_SECKEY_LEN],
+             const unsigned char pk[CAS_SIGN_PUBKEY_LEN],
+             uint64_t seq, const char *prev)
+{
+    struct cas_vrec v;
+    char root[CAS_HASH_HEX + 1];
+
+    /* a distinct but valid root per generation */
+    snprintf(root, sizeof(root),
+             "%064llx", (unsigned long long)(0x1000 + seq));
+
+    fill(&v, pk, seq, root, prev);
+    ASSERT_INT_EQ(cas_vrec_encode(&v, sk, out), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_address(out, addr), CAS_OK);
+}
+
+static void
+test_succession_rules(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_pair(sk, pk, seed_a), CAS_OK);
+
+    unsigned char r1[CAS_VREC_LEN], r2[CAS_VREC_LEN], r3[CAS_VREC_LEN];
+    char a1[CAS_HASH_HEX + 1], a2[CAS_HASH_HEX + 1], a3[CAS_HASH_HEX + 1];
+
+    chain_record(r1, a1, sk, pk, 1, NULL);
+    chain_record(r2, a2, sk, pk, 2, a1);
+    chain_record(r3, a3, sk, pk, 3, a2);
+
+    struct cas_vrec v1, v2, v3;
+
+    ASSERT_INT_EQ(cas_vrec_decode(r1, sizeof(r1), &v1), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_decode(r2, sizeof(r2), &v2), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_decode(r3, sizeof(r3), &v3), CAS_OK);
+
+    /* no head yet: anything valid starts one */
+    ASSERT_INT_EQ(cas_vrec_succeeds(NULL, NULL, &v1), CAS_OK);
+
+    /* the immediate successor */
+    ASSERT_INT_EQ(cas_vrec_succeeds(&v1, a1, &v2), CAS_OK);
+
+    /* backwards is stale, and so is the head itself */
+    ASSERT_INT_EQ(cas_vrec_succeeds(&v2, a2, &v1), CAS_SIGN_ESTALE);
+    ASSERT_INT_EQ(cas_vrec_succeeds(&v2, a2, &v2), CAS_SIGN_ESTALE);
+
+    /* a jump is neither accepted nor refused: the caller decides
+     * whether to fetch what it missed */
+    ASSERT_INT_EQ(cas_vrec_succeeds(&v1, a1, &v3), CAS_SIGN_EGAP);
+
+    /* right seq, wrong link */
+    ASSERT_INT_EQ(cas_vrec_succeeds(&v1, a2, &v2), CAS_SIGN_ECHAIN);
+}
+
+static void
+test_fork_is_its_own_answer(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_pair(sk, pk, seed_a), CAS_OK);
+
+    /* Two properly signed records at one seq.  A single writer that is
+     * behaving cannot produce this, so it is evidence the key is being
+     * used by someone else, and it must not read as an ordinary stale
+     * update that a caller would shrug past. */
+    struct cas_vrec va, vb;
+    unsigned char ra[CAS_VREC_LEN], rb[CAS_VREC_LEN];
+
+    fill(&va, pk, 5, root_a, NULL);
+    fill(&vb, pk, 5, root_b, NULL);
+    ASSERT_INT_EQ(cas_vrec_encode(&va, sk, ra), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_encode(&vb, sk, rb), CAS_OK);
+
+    char aa[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_vrec_address(ra, aa), CAS_OK);
+
+    struct cas_vrec da, db;
+
+    ASSERT_INT_EQ(cas_vrec_decode(ra, sizeof(ra), &da), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_decode(rb, sizeof(rb), &db), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_succeeds(&da, aa, &db), CAS_SIGN_EFORK);
+}
+
+static void
+test_other_topic_is_rejected(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    unsigned char sk_a[CAS_SIGN_SECKEY_LEN], pk_a[CAS_SIGN_PUBKEY_LEN];
+    unsigned char sk_b[CAS_SIGN_SECKEY_LEN], pk_b[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_pair(sk_a, pk_a, seed_a), CAS_OK);
+    ASSERT_INT_EQ(cas_sign_key_pair(sk_b, pk_b, seed_b), CAS_OK);
+
+    unsigned char ra[CAS_VREC_LEN], rb[CAS_VREC_LEN];
+    char aa[CAS_HASH_HEX + 1], ab[CAS_HASH_HEX + 1];
+
+    chain_record(ra, aa, sk_a, pk_a, 1, NULL);
+    chain_record(rb, ab, sk_b, pk_b, 2, aa);
+
+    struct cas_vrec va, vb;
+
+    ASSERT_INT_EQ(cas_vrec_decode(ra, sizeof(ra), &va), CAS_OK);
+    ASSERT_INT_EQ(cas_vrec_decode(rb, sizeof(rb), &vb), CAS_OK);
+
+    /* B's record is perfectly valid; it just is not a continuation of
+     * A's topic, and a subscriber to A must not follow it. */
+    ASSERT_INT_EQ(cas_vrec_succeeds(&va, aa, &vb), CAS_SIGN_ETOPIC);
+}
+
+struct walk_ctx {
+    int count;
+    uint64_t seqs[8];
+};
+
+static int
+walk_collect(const struct cas_vrec *v, const char *addr, void *ctx)
+{
+    struct walk_ctx *w = ctx;
+
+    (void)addr;
+    if (w->count < 8)
+        w->seqs[w->count] = v->seq;
+    w->count++;
+    return 0;
+}
+
+static void
+test_chain_walk(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    char depot[512];
+
+    snprintf(depot, sizeof(depot), "%s/walk", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    ASSERT(store != NULL);
+    if (!store)
+        return;
+
+    unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_pair(sk, pk, seed_a), CAS_OK);
+
+    unsigned char rec[4][CAS_VREC_LEN];
+    char addr[4][CAS_HASH_HEX + 1];
+
+    chain_record(rec[0], addr[0], sk, pk, 1, NULL);
+    chain_record(rec[1], addr[1], sk, pk, 2, addr[0]);
+    chain_record(rec[2], addr[2], sk, pk, 3, addr[1]);
+    chain_record(rec[3], addr[3], sk, pk, 4, addr[2]);
+
+    for (int i = 0; i < 4; i++) {
+        char h[CAS_HASH_HEX + 1];
+
+        ASSERT_INT_EQ(cas_put_object(store, CAS_VREC_TYPE, rec[i],
+                                     CAS_VREC_LEN, h), CAS_OK);
+        ASSERT_STR_EQ(h, addr[i]);
+    }
+
+    /* the whole chain, head first */
+    struct walk_ctx w = {0};
+
+    ASSERT_INT_EQ(cas_vchain_walk(store, addr[3], 0, walk_collect, &w),
+                  CAS_OK);
+    ASSERT_INT_EQ(w.count, 4);
+    ASSERT_INT_EQ((int)w.seqs[0], 4);
+    ASSERT_INT_EQ((int)w.seqs[3], 1);
+
+    /* stopping at a known-good point does not walk past it */
+    memset(&w, 0, sizeof(w));
+    ASSERT_INT_EQ(cas_vchain_walk(store, addr[3], 2, walk_collect, &w),
+                  CAS_OK);
+    ASSERT_INT_EQ(w.count, 3);
+    ASSERT_INT_EQ((int)w.seqs[2], 2);
+
+    /* a missing predecessor is an ordinary state for a node holding
+     * part of a history, not a verification failure */
+    ASSERT_INT_EQ(cas_remove(store, addr[0]), CAS_OK);
+    memset(&w, 0, sizeof(w));
+    ASSERT_INT_EQ(cas_vchain_walk(store, addr[3], 0, walk_collect, &w),
+                  CAS_SIGN_EINCOMPLETE);
+    ASSERT_INT_EQ(w.count, 3);
+
+    cas_free(store);
+}
+
+static void
+test_chain_walk_rejects_a_spliced_link(void)
+{
+    if (!cas_sign_available())
+        return;
+
+    char depot[512];
+
+    snprintf(depot, sizeof(depot), "%s/splice", tmpdir);
+
+    struct cas *store = cas_new(depot);
+
+    ASSERT(store != NULL);
+    if (!store)
+        return;
+
+    unsigned char sk[CAS_SIGN_SECKEY_LEN], pk[CAS_SIGN_PUBKEY_LEN];
+
+    ASSERT_INT_EQ(cas_sign_key_pair(sk, pk, seed_a), CAS_OK);
+
+    /* Two records at seq 1 and one at seq 3 that points back to the
+     * seq 1 record.  Every signature is genuine; the chain is not.
+     * Signatures alone cannot catch this, which is the reason the walk
+     * checks the link rather than trusting each record in isolation. */
+    unsigned char r1[CAS_VREC_LEN], r3[CAS_VREC_LEN];
+    char a1[CAS_HASH_HEX + 1], a3[CAS_HASH_HEX + 1];
+
+    chain_record(r1, a1, sk, pk, 1, NULL);
+    chain_record(r3, a3, sk, pk, 3, a1);
+
+    char h[CAS_HASH_HEX + 1];
+
+    ASSERT_INT_EQ(cas_put_object(store, CAS_VREC_TYPE, r1,
+                                 CAS_VREC_LEN, h), CAS_OK);
+    ASSERT_INT_EQ(cas_put_object(store, CAS_VREC_TYPE, r3,
+                                 CAS_VREC_LEN, h), CAS_OK);
+
+    struct walk_ctx w = {0};
+
+    ASSERT_INT_EQ(cas_vchain_walk(store, a3, 0, walk_collect, &w),
+                  CAS_SIGN_ECHAIN);
+
+    cas_free(store);
+}
+
 int
 main(void)
 {
+    if (!mkdtemp(tmpdir)) {
+        perror("mkdtemp");
+        return 1;
+    }
+    atexit(cleanup);
+
     fprintf(stderr, "--- cas-sign tests (backend: %s) ---\n",
             cas_sign_available() ? "monocypher" : "none");
 
@@ -354,6 +622,11 @@ main(void)
     RUN(test_encode_rejects_bad_fields);
     RUN(test_encoding_is_deterministic);
     RUN(test_record_is_an_ordinary_object);
+    RUN(test_succession_rules);
+    RUN(test_fork_is_its_own_answer);
+    RUN(test_other_topic_is_rejected);
+    RUN(test_chain_walk);
+    RUN(test_chain_walk_rejects_a_spliced_link);
 
     TEST_REPORT();
 }

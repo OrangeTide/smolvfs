@@ -72,6 +72,14 @@ enum {
     CAS_SIGN_EBADFORM   = -21,  /* not a well-formed record */
     CAS_SIGN_EBADBIND   = -22,  /* topic id is not the hash of the key */
     CAS_SIGN_EBADSIG    = -23,  /* signature does not verify */
+
+    /* chain */
+    CAS_SIGN_ETOPIC     = -24,  /* belongs to a different topic */
+    CAS_SIGN_ESTALE     = -25,  /* not newer than the current head */
+    CAS_SIGN_EFORK      = -26,  /* two records at one seq; see below */
+    CAS_SIGN_ECHAIN     = -27,  /* prev does not link to the predecessor */
+    CAS_SIGN_EGAP       = -28,  /* seq jumped; intermediates unseen */
+    CAS_SIGN_EINCOMPLETE = -29, /* chain ran out before its first record */
 };
 
 /** Human-readable text for a CAS_SIGN_* code. */
@@ -145,5 +153,83 @@ cas_vrec_encode(struct cas_vrec *v,
 int
 cas_vrec_decode(const unsigned char *buf, size_t len,
                 struct cas_vrec *out);
+
+/** Address of a record: the ordinary object address of its bytes. */
+int
+cas_vrec_address(const unsigned char rec[CAS_VREC_LEN], char *hash_out);
+
+/****************************************************************
+ * Chains
+ ****************************************************************
+ *
+ * A single record proves who published a root.  It says nothing about
+ * whether that publication is the newest one, which is a question
+ * about two records, and it is the question a subscriber actually has:
+ * a signature is just as valid on a version the publisher has since
+ * replaced.
+ *
+ * Records form a chain.  Each names its predecessor by address and
+ * carries a sequence number one higher, so the sequence is signed
+ * end to end and cannot be reordered or trimmed without the key.
+ *
+ * seq advances by exactly one.  The publisher assigns it and has no
+ * reason to skip, and requiring it makes any hole visible instead of
+ * indistinguishable from a record that never reached us.
+ */
+
+/** Decide whether `cand` may replace `cur` as a topic's head.
+ *
+ *  Both must have passed cas_vrec_decode already; this adds nothing to
+ *  their individual validity.  `cur` may be NULL for a first head, in
+ *  which case only the record's own consistency is required.
+ *
+ *  Returns CAS_OK to accept, or:
+ *
+ *    ETOPIC  a different topic entirely
+ *    ESTALE  older than, or identical to, the current head
+ *    EFORK   a *different* record at the same seq
+ *    ECHAIN  the immediate successor, but prev names something else
+ *    EGAP    newer, but with seq holes this node has not seen
+ *
+ *  EFORK deserves its own answer.  A single writer that is behaving
+ *  cannot produce two records at one seq, so seeing both is evidence
+ *  its key is being used by someone else.  It is not a validation
+ *  failure to retry past; it is the one outcome that should stop a
+ *  subscriber and raise an alarm.
+ *
+ *  EGAP is not a rejection either.  It means the caller has to decide:
+ *  fetch the intermediate records and re-check, which gets full
+ *  continuity, or accept the jump on the signature alone, which is
+ *  sound for advancing a head but abandons the audit trail.  Hiding
+ *  that choice inside a yes-or-no answer would make it invisible.
+ */
+int
+cas_vrec_succeeds(const struct cas_vrec *cur, const char *cur_addr,
+                  const struct cas_vrec *cand);
+
+/** Callback for cas_vchain_walk.  Return nonzero to stop the walk. */
+typedef int (*cas_vchain_fn)(const struct cas_vrec *v, const char *addr,
+                             void *ctx);
+
+/** Walk a chain backwards from `head_addr`, verifying as it goes.
+ *
+ *  Each record is fetched from `store`, decoded and verified, and
+ *  checked against its successor: same topic, seq exactly one lower,
+ *  and the successor's prev naming its address.  `fn` sees each record
+ *  from the head down.
+ *
+ *  Stops when it reaches a record with seq == stop_seq, or the first
+ *  record of the chain.  Returns CAS_OK if it got there, or
+ *  CAS_SIGN_EINCOMPLETE if a predecessor is not in the store, which is
+ *  an ordinary state for a node holding only part of a history rather
+ *  than a sign of anything wrong.
+ *
+ *  A cycle is not possible: a record's address covers its prev field,
+ *  so closing a loop would mean predicting a hash.  The walk is bounded
+ *  regardless, since seq falls by one each step.
+ */
+int
+cas_vchain_walk(struct cas *store, const char *head_addr,
+                uint64_t stop_seq, cas_vchain_fn fn, void *ctx);
 
 #endif /* CAS_SIGN_H */
