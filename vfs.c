@@ -189,47 +189,60 @@ path_parent(char *buf, size_t bufsz, const char *path)
 	return VFS_OK;
 }
 
-/** Validate a single filename component (no path separators). */
-static int
-validate_filename(const char *name)
-{
-	if (!name || !name[0] || strcmp(name, ".") == 0 ||
-	    strcmp(name, "..") == 0)
-		return VFS_EBADPATH;
-
-	for (const char *p = name; *p; p++) {
-		if ((unsigned char)*p < 0x20)
-			return VFS_EBADPATH;
-		if (strchr(illegal_chars, *p))
-			return VFS_EBADPATH;
-	}
-	return VFS_OK;
-}
-
-/** Validate all components of a normalized path. */
+/** Validate every component of a normalized path.
+ *
+ *  Rejects empty components, "." and "..", control characters, and the
+ *  illegal character set.  A single trailing separator is tolerated,
+ *  since it leaves no component behind it.
+ *
+ *  The path is walked once, one character at a time, and no character
+ *  is read twice.  An earlier version copied the path into a scratch
+ *  buffer so it could write NUL terminators over the separators, and
+ *  gcc's analyzer reported that copy as a use of uninitialized memory.
+ *  Callers pass a VFS_PATH_MAX stack buffer that vfs_normalize filled
+ *  only up to its terminator, and the analyzer cannot prove that a
+ *  strlen-derived length stops inside the written prefix.  A strictly
+ *  forward scan gives it nothing to doubt, and drops the scratch buffer
+ *  and its duplicate VFS_PATH_MAX bound as well.
+ */
 static int
 validate_path_components(const char *path)
 {
 	if (strcmp(path, "/") == 0)
 		return VFS_OK;
 
-	char tmp[VFS_PATH_MAX];
-	size_t len = strlen(path);
-	if (len >= VFS_PATH_MAX)
+	if (strlen(path) >= VFS_PATH_MAX)
 		return VFS_EBADPATH;
-	memcpy(tmp, path, len + 1);
 
-	char *tok = tmp + 1;
-	while (*tok) {
-		char *slash = strchr(tok, '/');
-		if (slash)
-			*slash = '\0';
-		int rc = validate_filename(tok);
-		if (rc != VFS_OK)
-			return rc;
-		if (!slash)
+	size_t comp = 0;  /* characters in the current component */
+	int dots = 1;     /* current component is all dots so far */
+
+	for (const char *p = path + 1;; p++) {
+		unsigned char c = (unsigned char)*p;
+
+		if (c != '\0' && c != '/') {
+			if (c < 0x20 || strchr(illegal_chars, (char)c))
+				return VFS_EBADPATH;
+			if (c != '.')
+				dots = 0;
+			comp++;
+			continue;
+		}
+
+		if (comp == 0) {
+			/* Empty component.  Only a trailing separator
+			 * gets here without one, and that is allowed. */
+			if (c == '\0')
+				break;
+			return VFS_EBADPATH;
+		}
+		if (dots && comp <= 2)
+			return VFS_EBADPATH; /* "." or ".." */
+		if (c == '\0')
 			break;
-		tok = slash + 1;
+
+		comp = 0;
+		dots = 1;
 	}
 	return VFS_OK;
 }

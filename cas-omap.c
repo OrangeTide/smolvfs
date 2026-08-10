@@ -205,17 +205,26 @@ page_load(struct cas_omap *om, struct omap_dir_entry *de)
      *
      * Suppressed narrowly rather than left standing, so that `make
      * analyze` stays clean and a genuine leak elsewhere is not lost in
-     * the noise. */
+     * the noise.
+     *
+     * The suppressed region has to run to the end of the function, not
+     * just cover the assignment.  The analyzer reports a leak wherever
+     * the last reference to pg dies, and which statement that is moves
+     * between compiler versions: gcc 13 blames the assignment, gcc 14
+     * and later blame the return.  Everything from the assignment to
+     * the closing brace is inside the region so either choice lands in
+     * it.  The pop sits after the brace because the analyzer can also
+     * pick the end of the function as the leak site. */
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
 #endif
     de->cached = pg;
+    return CAS_OK;
+}
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-    return CAS_OK;
-}
 
 static int
 page_ensure(struct cas_omap *om, uint64_t id,
