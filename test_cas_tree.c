@@ -1860,10 +1860,29 @@ test_htree_forged_table_pointer(void)
     ASSERT_STR_EQ(type, "htree");
 
     size_t orig_len = cf.len;
+
+    /* Every htree ends with a four-byte checksum and the "HTv1" magic,
+     * so a stored one is always longer than that trailer.  Checked
+     * rather than assumed because cdb_len below subtracts 8 from an
+     * unsigned length, and gcc's analyzer is right to point out that it
+     * has been given nothing that rules out the wrap. */
+    ASSERT(orig_len > 8);
+    if (orig_len <= 8) {
+        cas_close(&cf);
+        cas_tree_free(ct);
+        cas_free(store);
+        return;
+    }
+
     size_t namelen = strlen(target);
     size_t reclen = 8 + namelen + 56;
     size_t cdb_len = orig_len - 8;
-    size_t forged_len = orig_len + reclen;
+
+    /* Sized from cdb_len rather than the equal orig_len + reclen.  Every
+     * write below is placed relative to cdb_len, so expressing the
+     * capacity in the same term lets the analyzer compare the two
+     * directly instead of having to see through the subtraction. */
+    size_t forged_len = cdb_len + 8 + reclen;
     unsigned char *forged = calloc(1, forged_len);
 
     ASSERT(forged != NULL);
@@ -1897,7 +1916,11 @@ test_htree_forged_table_pointer(void)
     memcpy(forged + rec + 8 + namelen + 24, evil_bin, CAS_HASH_LEN);
     t_store_le32(forged + spos + 4, (uint32_t)rec);
 
-    size_t new_cdb = forged_len - 8;
+    /* forged_len - 8, written the long way round for the same reason
+     * forged_len itself was: the analyzer can place this offset inside
+     * the buffer when both are built up from cdb_len, and cannot when
+     * it has to reverse a subtraction to get there. */
+    size_t new_cdb = cdb_len + reclen;
 
     t_store_le32(forged + new_cdb, t_adler32(forged, new_cdb));
     memcpy(forged + new_cdb + 4, "HTv1", 4);

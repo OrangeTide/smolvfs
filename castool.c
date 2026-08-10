@@ -73,11 +73,14 @@ static int
 expand_at_file(struct arglist *al, const char *path)
 {
 	FILE *fp;
+	int opened = 0;  /* we opened fp, so we have to close it */
 
-	if (strcmp(path, "-") == 0)
+	if (strcmp(path, "-") == 0) {
 		fp = stdin;
-	else
+	} else {
 		fp = fopen(path, "r");
+		opened = 1;
+	}
 
 	if (!fp) {
 		fprintf(stderr, "%s: cannot open '@%s': %s\n",
@@ -95,13 +98,17 @@ expand_at_file(struct arglist *al, const char *path)
 		if (len == 0)
 			continue;
 		if (arglist_add(al, line) != 0) {
-			if (fp != stdin)
+			if (opened)
 				fclose(fp);
 			return -1;
 		}
 	}
 
-	if (fp != stdin)
+	/* Keyed off the flag rather than an fp != stdin test.  The test says
+	 * the same thing to a reader, but it leaves gcc's analyzer exploring
+	 * a path where fopen returned stdin and the handle is never closed,
+	 * which it reports as a leak. */
+	if (opened)
 		fclose(fp);
 	return 0;
 }

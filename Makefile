@@ -171,8 +171,51 @@ run: smolvfs
 ## Build everything under gcc's static analyzer.  Expected to be clean;
 ## the one known false positive is suppressed at its site in cas-omap.c
 ## with a comment saying why.
+##
+## Run at -O0 as well as -O1.  The analyzer sees a different program at
+## each level, because inlining and folding change what it can prove, so
+## a level we skip is a level whose warnings we never see.  Two reports
+## reached us from a downstream vendor that only appear at -O0, which is
+## why both levels are built here now.  Override CC to try another
+## compiler; analyzer coverage grows with each gcc release, so a newer
+## one finds things this one does not:
+##
+##     make analyze CC=gcc-14
+##
+## Clean under gcc 13.  gcc 14 adds four reports, all triaged as false
+## positives and all left standing rather than papered over, since the
+## code they point at is already the clear way to write it:
+##
+##   cas-tree.c:197   leak of 'p'.  Reported at the `if (!p)` test, two
+##                    lines before the store to dir->entries that keeps
+##                    it.  Only appears down a 120-event call chain, so
+##                    it is the analyzer giving up rather than a real
+##                    path through the code.
+##   cas-tree.c:1822  dir.count uninitialized.  cas_tree_load returns
+##                    CAS_OK only via tree_text_load or htree_parse_dir,
+##                    and both call cas_tree_dir_init before any such
+##                    return.  Goes away when the analyzer is given a
+##                    larger node budget.
+##   castool.c:60     leak in arglist_add.  realloc moves an array of
+##                    strdup'd pointers, and the analyzer loses track of
+##                    the pointers stored inside the moved region.
+##   test_cas_tree.c  out-of-bounds write of cf.len - 8 bytes into a
+##                    cf.len + 74 byte buffer, with cf.len > 8 checked
+##                    just above.  Relating the two symbolic lengths is
+##                    beyond it.
+##
+## Raising --param analyzer-max-enodes-per-program-point also produces a
+## double-free at cas-tree.c:82.  That one is wrong about C rather than
+## merely imprecise: it takes realloc's free-the-old-buffer edge together
+## with its return-NULL edge, and a failed realloc frees nothing.
 analyze: clean-all
-	$(MAKE) CFLAGS="-Wall -Wextra -O1 -fanalyzer" $(TEST_BINS) castool cas-fetch
+	@for opt in 0 1; do \
+	    echo "=== analyze: -O$$opt ($(CC)) ==="; \
+	    $(MAKE) --no-print-directory clean >/dev/null; \
+	    $(MAKE) --no-print-directory \
+	        CFLAGS="-Wall -Wextra -O$$opt -fanalyzer" \
+	        $(TEST_BINS) castool cas-fetch || exit 1; \
+	done
 
 ## Build everything with the address and undefined-behaviour sanitizers
 ## and run the suite under them.
