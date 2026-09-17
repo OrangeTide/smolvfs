@@ -604,6 +604,26 @@ write_full(int fd, const void *data, size_t len)
     return CAS_OK;
 }
 
+/*
+ * fsync a directory so a rename or unlink of an entry within it is made
+ * durable. The object data is fsynced before the rename, but the rename
+ * itself only reaches disk once the directory is fsynced. Without this a
+ * crash can leave a committed ref pointing at an object whose directory
+ * entry was lost. Failure to open or fsync the directory is best effort:
+ * the caller has already reported success for the object write, and there
+ * is no clean way to unwind a completed rename.
+ */
+static void
+fsync_dir(const char *dirpath)
+{
+    int fd = open(dirpath, O_RDONLY | O_DIRECTORY);
+
+    if (fd < 0)
+        return;
+    fsync(fd);
+    close(fd);
+}
+
 /** Format "type len\0" into buf, return total length including NUL. */
 static int
 format_header(char *buf, size_t bufsz, const char *type, size_t len)
@@ -1070,6 +1090,8 @@ cas_put_object(struct cas *store, const char *type,
         CAS_LOG(CAS_LOG_PUT_RENAME, NULL);
     }
 
+    fsync_dir(dir);
+
     memcpy(hash_out, hash, CAS_HASH_HEX + 1);
     return CAS_OK;
 }
@@ -1156,6 +1178,8 @@ cas_put_object_at(struct cas *store, const char *type,
             return CAS_EIO;
         /* Target exists: dedup success, fall through */
     }
+
+    fsync_dir(dir);
 
     return CAS_OK;
 }
@@ -1247,6 +1271,8 @@ cas_put_precompressed(struct cas *store, const char *type, int codec,
             return CAS_EIO;
         /* Target exists: dedup success, fall through */
     }
+
+    fsync_dir(dir);
 
     return CAS_OK;
 }
