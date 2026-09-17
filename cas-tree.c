@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cas-tree.h"
+#include "cas-pack.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -1940,6 +1941,84 @@ cas_tree_gc(struct cas_tree *ct, time_t grace, cas_tree_gc_fn fn,
 
     if (removed)
         *removed = sc.removed;
+
+    hash_set_free(&reachable);
+    return CAS_OK;
+}
+
+static int
+keep_reachable(const char *hash, void *ctx)
+{
+    return hash_set_contains((struct hash_set *)ctx, hash);
+}
+
+int
+cas_tree_gc_pack(struct cas_tree *ct, time_t grace, int policy, int codec,
+                 cas_tree_gc_fn fn, void *ctx, int *removed,
+                 uint64_t *reclaimed)
+{
+    struct hash_set reachable;
+
+    hash_set_init(&reachable);
+
+    struct mark_ref_ctx mc = {
+        .ct = ct,
+        .reachable = &reachable,
+        .rc = CAS_OK,
+    };
+
+    cas_tree_ref_foreach(ct, mark_ref, &mc);
+    if (mc.rc != CAS_OK) {
+        hash_set_free(&reachable);
+        return mc.rc;
+    }
+
+    struct cas *store = cas_tree_cas(ct);
+    char path[512];
+
+    if (snprintf(path, sizeof(path), "%s/pack.dat",
+                 cas_basedir(store)) >= (int)sizeof(path)) {
+        hash_set_free(&reachable);
+        return CAS_ERR;
+    }
+
+    /* Rebuild the pack with only reachable objects.  Unreachable objects
+     * are left out whether they were loose or already in the pack, so
+     * garbage trapped in the pack is expunged here.  The depot write lock
+     * is held for the store's lifetime, so this reachability set is a
+     * consistent snapshot with no concurrent writer to race. */
+    int rc = cas_pack_create_filtered(store, path, policy, codec,
+                                      keep_reachable, &reachable);
+
+    if (rc != CAS_OK) {
+        hash_set_free(&reachable);
+        return rc;
+    }
+
+    /* Reclaim the loose copies now safely in the pack (the reachable set),
+     * which also points the live store at the rebuilt pack. */
+    uint64_t rc_count = 0;
+
+    cas_pack_reclaim(store, path, &rc_count);
+
+    /* Sweep unreachable loose objects past the grace period, exactly as
+     * cas_tree_gc does.  A recently written unreachable loose object stays,
+     * protected by grace until its ref is created or it truly ages out. */
+    struct sweep_ctx sc = {
+        .store = store,
+        .reachable = &reachable,
+        .fn = fn,
+        .ctx = ctx,
+        .cutoff = grace > 0 ? time(NULL) - grace : 0,
+        .removed = 0,
+    };
+
+    cas_foreach(store, sweep_visitor, &sc);
+
+    if (removed)
+        *removed = sc.removed;
+    if (reclaimed)
+        *reclaimed = rc_count;
 
     hash_set_free(&reachable);
     return CAS_OK;

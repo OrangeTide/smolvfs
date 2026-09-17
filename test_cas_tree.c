@@ -741,6 +741,82 @@ test_gc_preserves_history(void)
 }
 
 /****************************************************************
+ * GC -- compacting pack expunges trapped garbage
+ *
+ * cas_tree_gc_pack rebuilds the pack from only the reachable objects, so
+ * an unreachable object that was trapped in the pack is expunged, and
+ * reachable objects survive readable through the pack.
+ ****************************************************************/
+
+static void
+test_gc_pack_compacts(void)
+{
+	struct cas *store = make_store("gc_pack");
+	struct cas_tree *ct = cas_tree_new(store);
+
+	char blob[CAS_HASH_HEX + 1];
+	char orphan[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(store, "keepme", 6, blob), CAS_OK);
+	ASSERT_INT_EQ(cas_put(store, "garbage", 7, orphan), CAS_OK);
+
+	struct cas_tree_dir dir;
+
+	cas_tree_dir_init(&dir);
+
+	struct cas_tree_entry e = { .mode = 0100644 };
+
+	memcpy(e.hash, blob, CAS_HASH_HEX + 1);
+	strcpy(e.name, "a.txt");
+	ASSERT_INT_EQ(cas_tree_dir_add(&dir, &e), CAS_OK);
+
+	char tree_hash[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_tree_store(ct, &dir, tree_hash), CAS_OK);
+	ASSERT_INT_EQ(cas_tree_ref_commit(ct, "main", tree_hash, "v1"),
+	              CAS_OK);
+
+	/* Pack everything, orphan included, and drop the loose copies so the
+	 * orphan is trapped in the pack with no loose copy left. */
+	char packpath[600];
+
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat",
+	         cas_basedir(store));
+	ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+
+	uint64_t reclaimed = 0;
+
+	ASSERT_INT_EQ(cas_pack_reclaim(store, packpath, &reclaimed), CAS_OK);
+	ASSERT_INT_EQ((int)reclaimed, 3);
+	ASSERT(cas_exists(store, orphan));  /* still there, via the pack */
+
+	/* Compacting gc: reachable = {blob, tree}; the orphan is dropped. */
+	int removed = 0;
+
+	reclaimed = 0;
+	ASSERT_INT_EQ(cas_tree_gc_pack(ct, 0, CAS_COMPRESS_NEVER,
+	              CAS_CODEC_NONE, NULL, NULL, &removed, &reclaimed),
+	              CAS_OK);
+
+	/* The orphan is expunged; reachable objects remain, readable and
+	 * fsck-clean through the pack, with no loose copy. */
+	ASSERT(!cas_exists(store, orphan));
+	ASSERT(cas_exists(store, blob));
+	ASSERT(cas_exists(store, tree_hash));
+
+	struct cas_file cf;
+	unsigned char tr[CAS_PACK_BLOCK];
+
+	ASSERT_INT_EQ(cas_open_loose_raw(store, &cf, blob, tr),
+	              CAS_ENOTFOUND);
+	ASSERT_INT_EQ(cas_fsck_object(store, blob), CAS_FSCK_OK);
+
+	cas_tree_dir_free(&dir);
+	cas_tree_free(ct);
+	cas_free(store);
+}
+
+/****************************************************************
  * GC -- empty store
  ****************************************************************/
 
@@ -2523,6 +2599,7 @@ main(void)
     RUN(test_fsck_corrupt_blob);
     RUN(test_fsck_root);
     RUN(test_gc_basic);
+    RUN(test_gc_pack_compacts);
     RUN(test_gc_preserves_history);
     RUN(test_gc_empty);
     RUN(test_gc_grace_period);

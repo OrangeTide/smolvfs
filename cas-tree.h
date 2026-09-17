@@ -257,6 +257,25 @@ int
 cas_tree_gc(struct cas_tree *ct, time_t grace, cas_tree_gc_fn fn,
             void *ctx, int *removed);
 
+/** Compacting gc: rebuild the pack from only the reachable objects, then
+ *  reclaim their loose copies and sweep unreachable loose objects past the
+ *  grace period.
+ *
+ *  Unlike cas_tree_gc, this expunges unreachable objects trapped in the
+ *  pack (a pack entry has no grace, since it predates the pack it sits in),
+ *  and it moves reachable loose objects into the pack.  policy and codec
+ *  set the pack's compression (a CAS_COMPRESS_* mode and codec tag from
+ *  cas-codec.h; pass CAS_COMPRESS_NEVER / CAS_CODEC_NONE for none).
+ *
+ *  Sets *removed to the count of unreachable loose objects deleted and
+ *  *reclaimed to the count of loose copies folded into the pack (both if
+ *  non-NULL).  Returns CAS_OK on success.
+ */
+int
+cas_tree_gc_pack(struct cas_tree *ct, time_t grace, int policy, int codec,
+                 cas_tree_gc_fn fn, void *ctx, int *removed,
+                 uint64_t *reclaimed);
+
 /****************************************************************
  * Ref iteration
  ****************************************************************/

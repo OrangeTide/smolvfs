@@ -173,6 +173,44 @@ int
 cas_pack_create_z(struct cas *store, const char *path, int policy,
                   int codec);
 
+/** Predicate for cas_pack_create_filtered: return nonzero to include the
+ *  object with this hex hash in the pack, zero to drop it. */
+typedef int (*cas_pack_keep_fn)(const char *hash, void *ctx);
+
+/** Like cas_pack_create_z, but pack only the objects keep() accepts.
+ *  Objects (loose or already in the pack at path) that keep() rejects are
+ *  left out of the new pack, so a caller that keeps only reachable objects
+ *  compacts the store, dropping unreachable ones that were trapped in the
+ *  pack.  A NULL keep packs everything, identical to cas_pack_create_z.
+ *  If every object is dropped, an empty pack is written.
+ *
+ *  Reachability is a tree-layer concept, so this is the primitive the
+ *  tree layer drives; cas_tree_gc_pack is the intended caller.
+ *
+ *  Returns CAS_OK on success.
+ */
+int
+cas_pack_create_filtered(struct cas *store, const char *path, int policy,
+                         int codec, cas_pack_keep_fn keep, void *ctx);
+
+/** Reclaim loose objects that are safely stored in the pack at path.
+ *
+ *  Intended to run after cas_pack_create/cas_pack_create_z, which commits
+ *  the pack durably.  This opens that committed pack fresh and, for each
+ *  loose object, deletes the loose copy only after confirming the pack
+ *  holds a retrievable, address-correct copy (a re-encoded htree is
+ *  confirmed by a successful decode, since its address is not the hash of
+ *  its stored bytes).  An object is therefore reachable through the pack
+ *  at every instant, including across a crash.  If the pack at path is
+ *  missing or invalid, no object has a pack copy, so nothing is removed
+ *  and CAS_OK is returned with *removed_out set to 0.
+ *
+ *  If non-NULL, *removed_out receives the number of loose objects deleted.
+ *  Returns CAS_OK on success.
+ */
+int
+cas_pack_reclaim(struct cas *store, const char *path, uint64_t *removed_out);
+
 /** Look up an object in a packfile by hex hash.
  *  On success, cf->data and cf->len are set.  For an uncompressed
  *  object the data points into the packfile mmap and cas_close()

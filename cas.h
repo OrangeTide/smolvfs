@@ -169,6 +169,14 @@ cas_free(struct cas *store);
 const char *
 cas_basedir(struct cas *store);
 
+/** Reopen the store's pack from basedir/pack.dat, replacing any pack
+ *  handle opened earlier.  Call after a pack is (re)created so the live
+ *  store reads objects from the new pack.  A missing or invalid pack
+ *  leaves the store with none.  Returns CAS_OK on success.
+ */
+int
+cas_reload_pack(struct cas *store);
+
 /****************************************************************
  * Operations
  ****************************************************************/

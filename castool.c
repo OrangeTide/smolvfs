@@ -855,16 +855,57 @@ static int
 cmd_gc(struct cas_tree *ct, int argc, char **argv)
 {
 	time_t grace = 3600;
+	int do_pack = 0;
+	int compress = 0;
 
-	if (argc >= 1 && strcmp(argv[0], "--now") == 0) {
-		grace = 0;
-	} else if (argc >= 1) {
-		fprintf(stderr, "usage: %s gc [--now]\n", progname);
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "--now") == 0)
+			grace = 0;
+		else if (strcmp(argv[i], "--pack") == 0)
+			do_pack = 1;
+		else if (strcmp(argv[i], "-z") == 0)
+			compress = 1;
+		else {
+			fprintf(stderr,
+			        "usage: %s gc [--now] [--pack] [-z]\n",
+			        progname);
+			return 1;
+		}
+	}
+
+	if (!do_pack && compress) {
+		fprintf(stderr, "%s: -z only applies with --pack\n", progname);
 		return 1;
 	}
 
 	int removed = 0;
-	int rc = cas_tree_gc(ct, grace, gc_reporter, NULL, &removed);
+	int rc;
+
+	if (do_pack) {
+		int did_compress = compress &&
+		                   cas_codec_can_encode(CAS_CODEC_DEFLATE);
+
+		if (compress && !did_compress)
+			fprintf(stderr,
+			        "%s: warning: no compression codec compiled "
+			        "in (build with MINIZ=1); packing "
+			        "uncompressed\n", progname);
+
+		int policy = did_compress ? CAS_COMPRESS_GUESS
+		                          : CAS_COMPRESS_NEVER;
+		int codec = did_compress ? CAS_CODEC_DEFLATE : CAS_CODEC_NONE;
+		uint64_t reclaimed = 0;
+
+		rc = cas_tree_gc_pack(ct, grace, policy, codec, gc_reporter,
+		                      NULL, &removed, &reclaimed);
+		if (rc == CAS_OK)
+			fprintf(stderr,
+			        "packed, reclaimed %llu loose object%s\n",
+			        (unsigned long long)reclaimed,
+			        reclaimed == 1 ? "" : "s");
+	} else {
+		rc = cas_tree_gc(ct, grace, gc_reporter, NULL, &removed);
+	}
 
 	if (rc != CAS_OK) {
 		fprintf(stderr, "%s: gc failed\n", progname);
@@ -921,12 +962,16 @@ static int
 cmd_pack(struct cas_tree *ct, int argc, char **argv)
 {
 	int compress = 0;
+	int prune = 0;
 
 	for (int i = 0; i < argc; i++) {
 		if (strcmp(argv[i], "-z") == 0) {
 			compress = 1;
+		} else if (strcmp(argv[i], "--prune") == 0) {
+			prune = 1;
 		} else {
-			fprintf(stderr, "usage: %s pack [-z]\n", progname);
+			fprintf(stderr, "usage: %s pack [-z] [--prune]\n",
+			        progname);
 			return 1;
 		}
 	}
@@ -960,6 +1005,20 @@ cmd_pack(struct cas_tree *ct, int argc, char **argv)
 	}
 
 	fprintf(stderr, "pack: ok%s\n", did_compress ? " (compressed)" : "");
+
+	if (prune) {
+		uint64_t removed = 0;
+		int prc = cas_pack_reclaim(store, path, &removed);
+
+		if (prc != CAS_OK) {
+			fprintf(stderr, "%s: prune failed: %s\n",
+			        progname, cas_strerror(prc));
+			return 1;
+		}
+		fprintf(stderr, "prune: reclaimed %llu loose object%s\n",
+		        (unsigned long long)removed,
+		        removed == 1 ? "" : "s");
+	}
 	return 0;
 }
 
@@ -1350,9 +1409,11 @@ static const struct command commands[] = {
 	{ "rm",     cmd_rm,     "rm <ref> <name>..." },
 	{ "hash",   cmd_hash,   "hash [file]" },
 	{ "fsck",   cmd_fsck,   "fsck" },
-	{ "gc",     cmd_gc,     "gc [--now]" },
+	{ "gc",     cmd_gc,     "gc [--now] [--pack] [-z]  "
+	                        "(--pack compacts into the pack)" },
 	{ "prune",  cmd_prune,  "prune <ref> <keep-count>" },
-	{ "pack",   cmd_pack,   "pack [-z] loose objects (-z compresses)" },
+	{ "pack",   cmd_pack,   "pack [-z] [--prune] loose objects "
+	                        "(-z compresses, --prune reclaims loose)" },
 	{ "import-pack", cmd_import_pack,
 	  "import-pack [-z] <pack-file> [<ref> <root-hash>]" },
 	{ "keygen", cmd_keygen, "keygen <keyfile>" },

@@ -123,6 +123,169 @@ test_pack_create_open(void)
 }
 
 /****************************************************************
+ * test_repack_carries_old_pack
+ *
+ * A repack must fold the existing pack forward, not just the loose
+ * objects.  This is the invariant that makes reclaiming loose copies
+ * safe: once an object's only copy is in the pack, the next repack has
+ * to carry it forward.  Pack three objects, delete every loose copy so
+ * the pack is the only source, add one fresh loose object, then repack.
+ * All four must survive and read back intact.
+ ****************************************************************/
+
+static void
+test_repack_carries_old_pack(void)
+{
+	char depot[512], packpath[528];
+
+	snprintf(depot, sizeof(depot), "%s/repack", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat", depot);
+
+	struct cas *store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	char h1[CAS_HASH_HEX + 1], h2[CAS_HASH_HEX + 1];
+	char h3[CAS_HASH_HEX + 1], h4[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(store, "aaa", 3, h1), CAS_OK);
+	ASSERT_INT_EQ(cas_put(store, "bbb", 3, h2), CAS_OK);
+	ASSERT_INT_EQ(cas_put_object(store, "tree", "body", 4, h3),
+	              CAS_OK);
+
+	ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+	cas_free(store);
+
+	/* Drop every loose object (the XX/ fan-out dirs), leaving only
+	 * pack.dat and the lock file, so the pack is the sole copy. */
+	char cmd[600];
+
+	snprintf(cmd, sizeof(cmd),
+	         "rm -rf %s/[0-9a-f][0-9a-f]", depot);
+	ASSERT_INT_EQ(system(cmd), 0);
+
+	/* Reopen: reads must now come from the pack alone. */
+	store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	struct cas_file cf;
+	char type[CAS_TYPE_MAX + 1];
+
+	ASSERT_INT_EQ(cas_open(store, &cf, h1), CAS_OK);
+	ASSERT_INT_EQ((int)cf.len, 3);
+	ASSERT(memcmp(cf.data, "aaa", 3) == 0);
+	cas_close(&cf);
+
+	/* Add a fresh loose object, then repack: the new pack must be the
+	 * union of the old pack and the new loose object. */
+	ASSERT_INT_EQ(cas_put(store, "ccc", 3, h4), CAS_OK);
+	ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+	cas_free(store);
+
+	struct cas_pack *pack = cas_pack_open(packpath);
+	ASSERT(pack != NULL);
+	ASSERT_INT_EQ((int)cas_pack_count(pack), 4);
+
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, h1, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT(cf.len == 3 && memcmp(cf.data, "aaa", 3) == 0);
+	cas_close(&cf);
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, h2, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT(cf.len == 3 && memcmp(cf.data, "bbb", 3) == 0);
+	cas_close(&cf);
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, h3, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT_STR_EQ(type, "tree");
+	ASSERT(cf.len == 4 && memcmp(cf.data, "body", 4) == 0);
+	cas_close(&cf);
+	ASSERT_INT_EQ(cas_pack_lookup(pack, &cf, h4, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT(cf.len == 3 && memcmp(cf.data, "ccc", 3) == 0);
+	cas_close(&cf);
+
+	cas_pack_close(pack);
+}
+
+/****************************************************************
+ * test_pack_reclaim
+ *
+ * pack --prune must delete a loose copy only after the object is
+ * safely in the committed pack, and must leave loose objects that are
+ * not in the pack untouched.  Pack three objects, add a fourth loose
+ * object that was never packed, then reclaim: the three packed copies
+ * go loose-to-gone while staying readable through the pack, and the
+ * unpacked fourth object survives loose.
+ ****************************************************************/
+
+static void
+test_pack_reclaim(void)
+{
+	char depot[512], packpath[528];
+
+	snprintf(depot, sizeof(depot), "%s/reclaim", tmpdir);
+	snprintf(packpath, sizeof(packpath), "%s/pack.dat", depot);
+
+	struct cas *store = cas_new(depot);
+	ASSERT(store != NULL);
+
+	char h1[CAS_HASH_HEX + 1], h2[CAS_HASH_HEX + 1];
+	char h3[CAS_HASH_HEX + 1], h4[CAS_HASH_HEX + 1];
+
+	ASSERT_INT_EQ(cas_put(store, "aaa", 3, h1), CAS_OK);
+	ASSERT_INT_EQ(cas_put(store, "bbb", 3, h2), CAS_OK);
+	ASSERT_INT_EQ(cas_put_object(store, "tree", "body", 4, h3),
+	              CAS_OK);
+
+	ASSERT_INT_EQ(cas_pack_create(store, packpath), CAS_OK);
+
+	/* A fourth object added after packing: loose only, not in the
+	 * pack, so reclaim must leave it alone. */
+	ASSERT_INT_EQ(cas_put(store, "ccc", 3, h4), CAS_OK);
+
+	uint64_t removed = 0;
+
+	ASSERT_INT_EQ(cas_pack_reclaim(store, packpath, &removed), CAS_OK);
+	ASSERT_INT_EQ((int)removed, 3);
+
+	unsigned char tr[CAS_PACK_BLOCK];
+	struct cas_file cf;
+	char type[CAS_TYPE_MAX + 1];
+
+	/* The three packed objects have no loose copy left ... */
+	ASSERT_INT_EQ(cas_open_loose_raw(store, &cf, h1, tr),
+	              CAS_ENOTFOUND);
+	ASSERT_INT_EQ(cas_open_loose_raw(store, &cf, h2, tr),
+	              CAS_ENOTFOUND);
+	ASSERT_INT_EQ(cas_open_loose_raw(store, &cf, h3, tr),
+	              CAS_ENOTFOUND);
+
+	/* ... yet still read back through the pack. */
+	ASSERT_INT_EQ(cas_open_object(store, &cf, h1, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT(cf.len == 3 && memcmp(cf.data, "aaa", 3) == 0);
+	cas_close(&cf);
+	ASSERT_INT_EQ(cas_open_object(store, &cf, h3, type,
+	              sizeof(type)), CAS_OK);
+	ASSERT_STR_EQ(type, "tree");
+	ASSERT(cf.len == 4 && memcmp(cf.data, "body", 4) == 0);
+	cas_close(&cf);
+
+	/* The unpacked object keeps its loose copy. */
+	ASSERT_INT_EQ(cas_open_loose_raw(store, &cf, h4, tr), CAS_OK);
+	cas_close(&cf);
+	ASSERT_INT_EQ(cas_open(store, &cf, h4), CAS_OK);
+	ASSERT(cf.len == 3 && memcmp(cf.data, "ccc", 3) == 0);
+	cas_close(&cf);
+
+	/* A reclaimed object must still pass fsck through the pack. */
+	ASSERT_INT_EQ(cas_fsck_object(store, h1), CAS_FSCK_OK);
+	ASSERT_INT_EQ(cas_fsck_object(store, h3), CAS_FSCK_OK);
+	ASSERT_INT_EQ(cas_fsck_object(store, h4), CAS_FSCK_OK);
+
+	cas_free(store);
+}
+
+/****************************************************************
  * test_pack_endianness
  *
  * The packfile index and footer must store their 64-bit fields
@@ -919,6 +1082,8 @@ main(void)
 	fprintf(stderr, "--- cas-pack tests ---\n");
 
 	RUN(test_pack_create_open);
+	RUN(test_repack_carries_old_pack);
+	RUN(test_pack_reclaim);
 	RUN(test_pack_endianness);
 #ifdef CAS_WITH_MINIZ
 	RUN(test_pack_compressed);
