@@ -11,7 +11,7 @@
  * source, so a vendored copy is identifiable from this header alone. */
 #define SMOLVFS_VERSION_MAJOR 0
 #define SMOLVFS_VERSION_MINOR 4
-#define SMOLVFS_VERSION_PATCH 0
+#define SMOLVFS_VERSION_PATCH 1
 
 #define SMOLVFS_VERSION_STR_(x) #x
 #define SMOLVFS_VERSION_STR(x)  SMOLVFS_VERSION_STR_(x)
