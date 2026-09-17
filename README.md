@@ -45,7 +45,11 @@ index for fast lookup.  Both loose objects and packfile entries use the
 same 64-byte trailer structure, sharing hash verification and object
 reading code.  The CAS store auto-opens `pack.dat` in the depot
 directory at startup and transparently falls back to it for reads.
-Depends on `cas.h`.
+Packing is durable (the pack is fsynced and atomically renamed before
+anything relies on it) and folds any existing pack forward, so it never
+drops earlier objects.  Loose copies can then be reclaimed once the pack
+holds them, and a reachability-driven repack compacts the pack, dropping
+objects no ref reaches.  Depends on `cas.h`.
 
 **CAS** (`cas.h` / `cas.c`) -- A content-addressable store that writes
 objects to disk identified by their BLAKE2b-256 digest (32 bytes, 64 hex
@@ -211,9 +215,9 @@ The `-d` flag sets the depot directory (default: `depot`).
 | `rm` | `rm <ref> <name>...` | Remove named entries from a ref's tree |
 | `hash` | `hash [file]` | Compute the blob hash of a file (or stdin) |
 | `fsck` | `fsck` | Verify integrity of all reachable trees and blobs |
-| `gc` | `gc [--now]` | Remove unreachable objects older than one hour; `--now` drops the grace period and collects them all |
+| `gc` | `gc [--now] [--pack] [-z]` | Remove unreachable objects older than one hour; `--now` drops the grace period; `--pack` rebuilds the pack from only reachable objects, expunging unreachable ones trapped in it (`-z` compresses that pack) |
 | `prune` | `prune <ref> <keep-count>` | Drop all but the last `keep-count` entries from a ref's log |
-| `pack` | `pack [-z]` | Pack loose objects into `pack.dat`; `-z` compresses |
+| `pack` | `pack [-z] [--prune]` | Pack loose objects into `pack.dat`; `-z` compresses; `--prune` deletes each loose copy once the pack holds it |
 | `import-pack` | `import-pack [-z] <pack-file> [<ref> <root-hash>]` | Merge a downloaded bundle (packfile) into this depot, deduplicated; optionally pin a ref to its root |
 | `keygen` | `keygen <keyfile>` | Generate a signing key, written 0600 and never overwriting an existing one; prints the topic id and ref name |
 | `keyid` | `keyid <keyfile> [label]` | Print a key's topic id, public key, and the ref name a label would use |
@@ -229,30 +233,43 @@ path of its own.
 Where a command accepts `<ref-or-hash>`, either a ref name or a 64-character
 hex hash may be used.
 
-**Reclaiming disk space:** the natural maintenance cycle is `gc` (drop
-unreachable objects), then `pack -z` (roll the rest into one compressed
-packfile).  `-z` applies the `CAS_COMPRESS_GUESS` policy, compressing
-text-like objects into the packfile where that saves space and leaving
-binary or already-compressed content untouched, so a run of `gc` +
-`pack -z` is the usual way to shrink a depot on disk:
+**Reclaiming disk space:** packing rolls loose objects into `pack.dat`.
+By default `pack` leaves the loose copies on disk, where the pack simply
+shadows them on read.  To reclaim that space, `pack --prune` deletes each
+loose copy only after confirming the object is retrievable from the
+committed pack, so every object stays readable through the pack the
+instant its loose copy is gone.  `-z` applies the `CAS_COMPRESS_GUESS`
+policy, compressing text-like objects into the pack where that saves
+space and leaving binary or already-compressed content untouched:
 
 ```sh
-castool gc
-castool pack -z
+castool pack -z --prune
+```
+
+Unreachable objects are collected by `gc`.  Plain `gc` sweeps unreachable
+loose objects past the grace period.  `gc --pack` also rebuilds the pack
+from only the reachable objects: it folds reachable loose copies into the
+pack and expunges unreachable objects that were trapped in the pack.  A
+packed object predates the pack it sits in, so it needs no grace period.
+This is the compacting maintenance pass:
+
+```sh
+castool gc --pack
 ```
 
 Every entry in a ref's log keeps its snapshot reachable, so on a
 mutation-heavy ref `gc` alone reclaims nothing: committed history is
 retained forever. To bound that growth, `prune` a ref to its last N
-snapshots first, then `gc` reclaims the objects the dropped snapshots
-alone held. The newest entry is always kept, so the live tree is never
+snapshots first, then a compacting `gc --pack` reclaims the objects the
+dropped snapshots alone held, whether those objects are loose or already
+in the pack. The newest entry is always kept, so the live tree is never
 at risk. A pruned ref becomes sparse (its log may name objects the depot
 no longer stores); `gc` treats those as boundaries rather than errors,
 while `fsck` still verifies the live root of every ref.
 
 ```sh
 castool prune main 100
-castool gc --now
+castool gc --pack --now
 ```
 
 `pack -z` compresses with the bundled DEFLATE codec, so `castool` must
@@ -323,8 +340,11 @@ castool rm backup cas.h
 castool fsck
 castool gc
 
-# pack loose objects into a single packfile
-castool pack
+# pack loose objects into a single packfile and reclaim the loose copies
+castool pack --prune
+
+# compact: rebuild the pack from only reachable objects
+castool gc --pack
 
 # compute a blob hash without storing
 castool hash README.md
@@ -1103,8 +1123,11 @@ int
 cas_pack_create(struct cas *store, const char *path);
 ```
 
-Create a packfile from all loose objects in the store.  If the store has
-no loose objects, returns `CAS_OK` without creating a file.
+Create a packfile from the loose objects in the store, folding any
+existing pack at `path` forward so earlier objects are not dropped.  If
+there is nothing to pack, returns `CAS_OK` without creating a file.  The
+pack is fsynced and atomically renamed into place, so a crash cannot
+leave a pack whose bytes never reached disk.
 
 **Returns:** `CAS_OK` on success.
 
@@ -1121,8 +1144,37 @@ the policy selects it, it beats its stored size by a comfortable
 margin, and an encoder for `codec` is compiled in; already-compressed
 objects are copied unchanged.  Object addresses are unaffected.  Pass
 `CAS_COMPRESS_NEVER` for no compression.  This backs `castool pack -z`
-(which uses `CAS_COMPRESS_GUESS`) and the `gc` + `pack -z` disk-reclaim
-cycle.
+(which uses `CAS_COMPRESS_GUESS`).
+
+**Returns:** `CAS_OK` on success.
+
+```c
+int
+cas_pack_create_filtered(struct cas *store, const char *path, int policy,
+                         int codec, cas_pack_keep_fn keep, void *ctx);
+```
+
+Like `cas_pack_create_z`, but pack only the objects `keep()` accepts.
+Objects it rejects, loose or already in the pack at `path`, are left out
+of the new pack, so a caller that keeps only reachable objects compacts
+the store and drops unreachable ones trapped in the pack.  A `NULL`
+`keep` packs everything.  Reachability is a tree-layer concept, so this
+is the primitive `cas_tree_gc_pack` drives.
+
+**Returns:** `CAS_OK` on success.
+
+```c
+int
+cas_pack_reclaim(struct cas *store, const char *path, uint64_t *removed_out);
+```
+
+Delete the loose copies of objects that are safely stored in the pack at
+`path`, intended to run after `cas_pack_create`.  It opens the committed
+pack fresh and removes a loose object only after confirming the pack
+holds a retrievable, address-correct copy, so every object stays reachable
+through the pack across the whole operation, including a crash.  A missing
+or invalid pack removes nothing and returns `CAS_OK`.  `*removed_out` (if
+non-NULL) receives the count deleted.  This backs `castool pack --prune`.
 
 **Returns:** `CAS_OK` on success.
 
@@ -1450,7 +1502,9 @@ top level and distributes blobs roughly evenly across them.
 Loose objects can be rolled into a single packfile (`pack.dat`) using
 `castool pack` or `cas_pack_create()`.  On startup, `cas_new()` opens
 `pack.dat` if it exists and uses it as a read-through fallback for
-lookups.  See Pack format below for the on-disk layout.
+lookups.  Packing is additive by default, so the loose copies remain
+until `pack --prune` (or a compacting `gc --pack`) reclaims them.  See
+Pack format below for the on-disk layout.
 
 #### Hashing
 
@@ -1688,6 +1742,26 @@ grace period and delete all unreachable objects immediately.
 
 Sets `*removed` to the count of deleted objects (if non-NULL).  Calls
 `fn` for each removed hash.
+
+```c
+int
+cas_tree_gc_pack(struct cas_tree *ct, time_t grace, int policy, int codec,
+                 cas_tree_gc_fn fn, void *ctx, int *removed,
+                 uint64_t *reclaimed);
+```
+
+Compacting garbage collection.  It marks the reachable set the same way,
+then rebuilds `pack.dat` from only those objects, reclaims their loose
+copies, and finally sweeps unreachable loose objects past the grace
+period.  Unlike `cas_tree_gc`, it expunges unreachable objects trapped in
+the pack: a pack entry predates the pack it sits in, so it carries no
+grace.  `policy` and `codec` set the rebuilt pack's compression
+(`CAS_COMPRESS_*` and a codec tag; pass `CAS_COMPRESS_NEVER` /
+`CAS_CODEC_NONE` for none).  Sets `*removed` to the unreachable loose
+objects deleted and `*reclaimed` to the loose copies folded into the
+pack (both if non-NULL).  This backs `castool gc --pack`.
+
+**Returns:** `CAS_OK` on success.
 
 ### VFS-Snap API
 
@@ -2067,7 +2141,7 @@ interrupted backup always lands in a recoverable state:
 |----------|-------|----------|
 | `.root` missing or corrupt | Objects and log intact | Read `.prev` or last entry in `.log` to find the most recent valid root |
 | `.log` truncated | `.root` and objects intact | Current state is valid; log history is partial |
-| Orphan objects (no root references them) | Harmless | Next GC pass reclaims them |
+| Orphan objects (no root references them) | Harmless | Next GC pass reclaims them (`gc --pack` if already packed) |
 
 These are the same states produced by a crash during a normal commit, so
 the existing fsck and GC paths handle all backup recovery scenarios.
