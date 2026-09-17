@@ -1,4 +1,12 @@
 # makefile for smolvfs
+
+# Pin the default goal.  The `.config-stamp: FORCE` rule and the `FORCE:`
+# rule below come before the `all` rule, and make would otherwise pick
+# the first non-dotted target it sees as the default goal.  That is
+# `FORCE`, so a bare `make` built nothing and reported "Nothing to be
+# done for 'FORCE'" instead of building all.
+.DEFAULT_GOAL := all
+
 OBJCOPY ?= objcopy
 STRIP ?= strip
 RM ?= rm -f
