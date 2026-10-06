@@ -240,6 +240,11 @@ cas_tree_put_checked(struct cas_tree *ct, const char *type,
  * Garbage collection
  ****************************************************************/
 
+/* Implemented in cas-gc.c, a separate translation unit.  A consumer that
+ * uses the tree layer only as a content-addressed store, with no garbage
+ * collection, can leave cas-gc.c out of the build; nothing else in the
+ * tree layer depends on it. */
+
 /** Callback for cas_tree_gc progress reporting.
  *  Called for each removed hash.
  *  Return 0 to continue, nonzero to stop.

@@ -16,7 +16,7 @@ SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(SRCS:.c=.dep)
 LIB := libvfs.a
-LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-pack.c cas-omap.c vfs-snap.c cas-sign.c cas-topic.c
+LIBSRCS := vfs.c cas.c cas-codec.c cas-tree.c cas-gc.c cas-pack.c cas-omap.c vfs-snap.c cas-sign.c cas-topic.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 DEPS += $(LIBSRCS:.c=.dep)
 
@@ -86,7 +86,7 @@ smolvfs: $(OBJS) $(LIB) $(MINIZ_OBJS)
 	$(OBJCOPY) --only-keep-debug $@ $@.debug
 	$(STRIP) --strip-debug --strip-unneeded $@
 	$(OBJCOPY) --add-gnu-debuglink=$@.debug $@
-castool: castool.o cas-topic.o cas-sign.o cas-tree.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
+castool: castool.o cas-topic.o cas-sign.o cas-tree.o cas-gc.o cas-pack.o cas.o cas-codec.o $(SIGN_OBJS) $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 # Reference incremental HTTP downloader (examples/).  Needs libcurl-dev;
 # build with MINIZ=1 for compressed depots.  Not built by default.
@@ -101,7 +101,7 @@ test_cas: test_cas.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_vfs: test_vfs.o vfs.o
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
-test_cas_tree: test_cas_tree.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
+test_cas_tree: test_cas_tree.o cas-tree.o cas-gc.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 test_vfs_snap: test_vfs_snap.o vfs-snap.o vfs.o cas-tree.o cas-pack.o cas.o cas-codec.o $(MINIZ_OBJS)
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -lm
@@ -134,6 +134,8 @@ sample_main.o : sample_main.c
 test_cas.o : test_cas.c
 	$(compile.c)
 cas-tree.o : cas-tree.c
+	$(compile.c)
+cas-gc.o : cas-gc.c
 	$(compile.c)
 test_cas_tree.o : test_cas_tree.c
 	$(compile.c)

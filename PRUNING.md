@@ -3,7 +3,7 @@
 How smolvfs bounds depot growth for a mutation-heavy ref, and the
 reference contract that makes it safe. It also covers reclaiming the
 objects a prune frees, both loose and packed. This documents behavior
-that exists in code, in `cas-tree.c` and `cas-pack.c`.
+that exists in code, in `cas-tree.c`, `cas-gc.c`, and `cas-pack.c`.
 
 PUBLIC DOMAIN (CC0-1.0)
 
@@ -115,8 +115,9 @@ never makes a live root report missing.
 ## Packing and reclamation
 
 Pruning makes objects unreachable; a collection pass reclaims them. Where
-those objects live, loose or packed, decides which pass can do it. This
-part lives in `cas-pack.c` and `cas-tree.c`.
+those objects live, loose or packed, decides which pass can do it. The
+pack-level primitives live in `cas-pack.c`; the reachability collector
+that drives them (`cas_tree_gc`, `cas_tree_gc_pack`) lives in `cas-gc.c`.
 
 `castool pack` rolls loose objects into a single `pack.dat`, and `pack
 --prune` then deletes each loose copy once the pack holds it. This is
