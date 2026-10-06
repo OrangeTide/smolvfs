@@ -11,7 +11,18 @@ OBJCOPY ?= objcopy
 STRIP ?= strip
 RM ?= rm -f
 CFLAGS := -Wall -Wextra -g -Og -fno-omit-frame-pointer
-# CPPFLAGS := -NDEBUG
+
+# Feature-test macros.  cas.c and cas-tree.c use flock(2)/LOCK_EX from
+# <sys/file.h>, which are BSD extensions.  Under a strict -std=c99 the C
+# library headers hide them, so a consumer building the vendored sources
+# with -std=c99 sees "implicit function declaration of flock" and
+# "undeclared identifier LOCK_EX" even though <sys/file.h> is included.
+# This is most visible on macOS.  _DARWIN_C_SOURCE unhides the BSD names
+# on Apple platforms; _DEFAULT_SOURCE does the same on glibc.  Each macro
+# is ignored on the platform it does not apply to, so defining both is
+# safe everywhere.
+CPPFLAGS := -D_DARWIN_C_SOURCE -D_DEFAULT_SOURCE
+# CPPFLAGS += -DNDEBUG
 SRCS := sample_main.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(SRCS:.c=.dep)

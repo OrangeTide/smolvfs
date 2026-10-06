@@ -112,6 +112,16 @@ Add the `.c` files to your build.  The only requirement is a C99 (or later)
 compiler and POSIX for the CAS module (it uses `mmap`, `mkstemp`, `rename`).
 The VFS module is pure C99 with no POSIX dependency.
 
+The CAS module also uses `flock(2)` and `LOCK_EX` from `<sys/file.h>`, which
+are BSD extensions rather than part of C99 or base POSIX.  Under a strict
+`-std=c99` the C library hides them, so you get "implicit declaration of
+`flock`" and "undeclared identifier `LOCK_EX`" even though the header is
+included.  This bites most often on macOS.  Compile with `-std=gnu99` (or a
+later `gnu*` standard), or define the feature-test macro before the headers:
+`-D_DARWIN_C_SOURCE` on Apple platforms, `-D_DEFAULT_SOURCE` on glibc.  The
+bundled Makefile defines both, so it is only a concern when you compile the
+sources under a strict standard in your own build.
+
 ```sh
 cc -c vfs.c
 cc -c cas.c
