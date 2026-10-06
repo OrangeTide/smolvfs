@@ -458,6 +458,56 @@ cas-pack.c cas-omap.c vfs.c vfs-snap.c` with their headers and
 The rest of the archive (tests, `castool`, examples, CI) is not needed
 to use the library.
 
+### CAS-only subset
+
+The content-addressed store is a supported standalone configuration. A
+consumer that wants a plain blob store, with no VFS, signing, or object
+map, compiles four translation units and their headers:
+
+```
+cas.c  cas-codec.c  cas-pack.c  cas-tree.c
+```
+
+These build, link, and run on their own. None of them includes
+`cas-sign.h`, so signing is never pulled into this subset. It lives
+entirely in `cas-sign.c`, a separate unit you do not compile here. The
+same is true of the object map (`cas-omap.c`), the VFS layer (`vfs.c`,
+`vfs-snap.c`), and `castool`. The `cas-fetch` example and the
+`test_cas_tree` target in the Makefile link exactly these four files, so
+the configuration is exercised by the build you already have. If you meet
+a signed object while walking a tree, the tree layer reports it as a
+foreign type and stops descending rather than trying to verify it, so no
+signing code is reached.
+
+Compression is optional in this subset. Without `-DCAS_WITH_MINIZ` the
+DEFLATE codec is absent, `cas-codec.c` still compiles, and stored objects
+are raw. Add `cas-codec-miniz.c` and `third_party/miniz.c` with
+`-DCAS_WITH_MINIZ -DMINIZ_NO_STDIO` to enable DEFLATE.
+
+Garbage collection is a separate unit. The reachability mark-and-sweep
+collector (`cas_tree_gc`, `cas_tree_gc_pack`) lives in `cas-gc.c`, which
+this subset does not compile. Its prototypes stay in `cas-tree.h` so a
+consumer that does want GC adds one file. The pack-level primitives it
+builds on, `cas_pack_create_filtered` and `cas_pack_reclaim`, remain in
+`cas-pack.c` as ordinary pack operations; they are present in the subset
+but inert unless you call them.
+
+Two write-side rules a subset consumer should know, both specified in
+FORMAT.md:
+
+- Entry names must be well-formed UTF-8, 1 to 255 octets, with no `/`,
+  `\n`, or NUL. See "Entry names" for the exact accepted set and the
+  three encodings that are rejected. ASCII keys always pass. There is no
+  opt-out, by design: the UTF-8 rule is what makes unsigned-octet
+  ordering agree with codepoint ordering, and relaxing it would admit
+  overlong encodings of the very separators the name check exists to
+  reject.
+- Validation runs on write for objects from outside, and is not repeated
+  on read. See "Where these rules are enforced" for which paths check and
+  which do not. There is no per-write trusted-producer bypass today. The
+  write-side admission check is the single point a hostile producer is
+  turned away, so it is deliberately not skippable.
+
 ### Compiler flags
 
 The default Makefile uses:
